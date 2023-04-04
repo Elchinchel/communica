@@ -1,0 +1,38 @@
+[project]
+name = "communica"
+version = "0.1.0"
+authors = [
+  { name="Elchin Sarkarov", email="elchin751@gmail.com" },
+]
+description = "Easy to use IPC library"
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX",
+  "Operating System :: Microsoft :: Windows",
+]
+dependencies = ["typing-extensions"]
+
+[project.optional-dependencies]
+df = ["dataclass-factory"]
+orjson = ["orjson"]
+pydantic = ["pydantic"]
+rabbitmq = ["aiormq", "yarl"]
+
+[project.urls]
+"Homepage" = "https://github.com/elchinchel/communica-py"
+"Bug Tracker" = "https://github.com/elchinchel/communica-py/issues"
+
+[tool.setuptools]
+packages = ["communica"]
+
+[build-system]
+requires = ["setuptools>=40.8.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pyright]
+typeCheckingMode = "basic"
+reportIncompatibleMethodOverride = "warning"
