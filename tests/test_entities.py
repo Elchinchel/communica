@@ -10,56 +10,20 @@ from communica.pairs import *
 
 from utils import wait_tasks  # type: ignore
 from simple_entities_for_tests import(
+    CLIENT_ID,
     MessageExistenceChecker, MessageOrderChecker,
     client_to_server_messages, server_to_client_messages,
-    CLIENT_ID
+    run_concurrent_send_with_simples,
+    run_sequential_send_with_simples
 )
 
 
-# class TestSimpleEntities:
-    # @pytest.mark.asyncio
-    # async def test_sequential_send(connector, serializer):
-    #     async def run(entity, messages, done_event):
-    #         async with entity:
-    #             for message in messages:
-    #                 resp = await entity.request(message)
-    #                 assert resp == message, 'Response data must be equal to sent'
-    #             await done_event.wait()
+class TestSimpleEntities:
+    async def test_sequential_send(self, connector, serializer):
+        await run_sequential_send_with_simples(connector, serializer)
 
-    #     cli_checker = MessageOrderChecker(server_to_client_messages)
-    #     client = SimpleClient(
-    #         connector, cli_checker.handler, serializer, CLIENT_ID)
-
-    #     srv_checker = MessageOrderChecker(client_to_server_messages)
-    #     server = SimpleServer(connector, srv_checker.handler, serializer)
-
-    #     await wait_tasks(
-    #         run(server, server_to_client_messages, srv_checker.done),
-    #         run(client, client_to_server_messages, cli_checker.done),
-    #         timeout=10
-    #     )
-
-
-    # @pytest.mark.asyncio
-    # async def test_concurrent_send(connector, serializer):
-    #     async def run(entity, messages, done_event):
-    #         async with entity:
-    #             calls = [entity.throw(msg) for msg in messages]
-    #             await asyncio.gather(*calls)
-    #             await done_event.wait()
-
-    #     cli_checker = MessageExistenceChecker(server_to_client_messages)
-    #     client = SimpleClient(
-    #         connector, cli_checker.handler, serializer, CLIENT_ID)
-
-    #     srv_checker = MessageExistenceChecker(client_to_server_messages)
-    #     server = SimpleServer(connector, srv_checker.handler, serializer)
-
-    #     await wait_tasks(
-    #         run(server, server_to_client_messages, srv_checker.done),
-    #         run(client, client_to_server_messages, cli_checker.done),
-    #         timeout=10
-    #     )
+    async def test_concurrent_send(self, connector, serializer):
+        await run_concurrent_send_with_simples(connector, serializer)
 
 
 # class RouteEntitiesTestCase(EntitiesTestCase):

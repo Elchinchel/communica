@@ -1,6 +1,6 @@
 [project]
 name = "communica"
-version = "0.1.0"
+version = "0.1.4"
 authors = [
   { name="Elchin Sarkarov", email="elchin751@gmail.com" },
 ]
@@ -26,12 +26,13 @@ rabbitmq = ["aiormq", "yarl"]
 "Homepage" = "https://github.com/elchinchel/communica-py"
 "Bug Tracker" = "https://github.com/elchinchel/communica-py/issues"
 
-[tool.setuptools]
-packages = ["communica"]
-
 [build-system]
-requires = ["setuptools>=40.8.0", "wheel"]
+requires = ["setuptools>=61.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["communica*"]
+namespaces=false
 
 [tool.pyright]
 typeCheckingMode = "basic"

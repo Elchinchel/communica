@@ -197,6 +197,7 @@ class RmqConnection(BaseConnection):
 
         while not self._rmq_chan.is_closed:
             message = await waiter.wait()
+            print(message.header.properties.message_type)
 
             if message.header.properties.message_type == _MessageType.MESSAGE:
                 null_pos = message.body.find(NULL_CHAR)
@@ -251,6 +252,7 @@ class RmqConnection(BaseConnection):
                     )
                 )
             await self._rmq_chan.close()
+            await self._connector._check_connection_use()
         except _closed_exceptions():
             return
 
@@ -277,11 +279,13 @@ class RmqServer(asyncio.AbstractServer):
         return not self._chan.is_closed
 
     def close(self):
-        def del_task(_):
+        async def close_channel():
+            if not self._chan.is_closed:
+                await self._chan.close()
+            await self._connector._check_connection_use()
             del(self._close_task)
 
-        self._close_task = asyncio.create_task(self._chan.close())
-        self._close_task.add_done_callback(del_task)
+        self._close_task = asyncio.create_task(close_channel())
 
     async def wait_closed(self):
         if not hasattr(self, '_close_task'):
@@ -373,7 +377,8 @@ class RmqServer(asyncio.AbstractServer):
 
 class RmqConnector(BaseConnector):
     """
-    Uses RabbitMQ for communication.
+    Uses RabbitMQ for communication. Theoretically can be used
+    with any AMQP-compatible server, but this wasn't tested.
 
     WARNING:
         For this connector to work properly, only one client
@@ -388,7 +393,8 @@ class RmqConnector(BaseConnector):
 
     _TYPE = 'RABBITMQ'
 
-    __slots__ = ('_url', '_address', '_exchange', '_connect_id')
+    __slots__ = ('_url', '_address', '_connect_id',
+                 '_exchange', '_exchange_declared')
 
     @property
     def exchange(self):
@@ -424,6 +430,7 @@ class RmqConnector(BaseConnector):
         self._address = address
         self._exchange = exchange_name
         self._connect_id = connect_id
+        self._exchange_declared = False
 
     def _get_connect_queue_name(self):
         return self._fmt_queue_name('connect', 'server')
@@ -527,9 +534,18 @@ class RmqConnector(BaseConnector):
 
         chan = await self._open_channel()
         try:
+            if not self._exchange_declared:
+                await chan.exchange_declare(
+                    self._exchange,
+                    exchange_type="direct",
+                    durable=True,
+                )
+                self._exchange_declared = True
+
             return await self._client_connect(handshaker, chan)
         except Exception:
-            await chan.close()
+            if not chan.is_closed:
+                await chan.close()
             raise
 
 
@@ -553,6 +569,8 @@ class RmqConnector(BaseConnector):
                 continue
             await chan.close()
 
+        await self._check_connection_use()
+
     def dump_state(self) -> str:
         """Unsupported for this connector"""
         raise TypeError('This method unsupported cause user and password '
@@ -565,7 +583,7 @@ class RmqConnector(BaseConnector):
                         'are not encrypted in dump, which is insecure')
 
     async def _open_channel(self):
-        # there is two limits for simultaneously opened channels:
+        # there are two limits for simultaneously opened channels:
         # 65k defined by AMQP protocol (channel number range),
         # which cause 'while not (some channel closed)' loop in conn.channel()
         # and 'max-channels' limit set by AMQP server
@@ -593,6 +611,21 @@ class RmqConnector(BaseConnector):
             return await self._open_channel()
 
         return await conn.channel()
+
+    async def _check_connection_use(self):
+        print('check connection called')
+        conn = _connections.get(self._url)
+        if conn is None or isinstance(conn, asyncio.Future):
+            return
+
+        for chan in conn.channels.values():
+            if chan is not None and not chan.is_closed:
+                print(repr(chan), chan.is_closed)
+                return
+        print('deleting')
+        del(_connections[self._url])
+        print(_connections)
+        await conn.close()
 
     async def _queue_declare_and_bind(
             self,

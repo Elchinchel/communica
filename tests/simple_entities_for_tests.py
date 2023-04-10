@@ -75,7 +75,7 @@ async def run_sequential_send_with_simples(connector, serializer):
     srv_checker = MessageOrderChecker(client_to_server_messages)
     server = SimpleServer(connector, srv_checker.handler, serializer)
 
-    async with client, server:
+    async with server, client:
         await wait_tasks(
             run(server, server_to_client_messages, srv_checker.done),
             run(client, client_to_server_messages, cli_checker.done),
@@ -97,7 +97,7 @@ async def run_concurrent_send_with_simples(connector, serializer):
     srv_checker = MessageExistenceChecker(client_to_server_messages)
     server = SimpleServer(connector, srv_checker.handler, serializer)
 
-    async with client, server:
+    async with server, client:
         await wait_tasks(
             run(server, server_to_client_messages, srv_checker.done),
             run(client, client_to_server_messages, cli_checker.done),

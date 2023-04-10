@@ -1,6 +1,6 @@
 # Easy to use IPC library
 
-    This library is not ready yet as i imagine it.
+    This library is still in development process.
     There will be added Pub/Sub entities and data validation in
     serializers with pydantic and dataclass-factory libraries.
 
@@ -32,6 +32,7 @@ but lose messages on every disconnect.
 
 You can install additional dependencies for various features
 
+`pip install communica[extraname1, extraname2]`
 | Extra name | Feature |
 | --- | --- |
 | orjson | Faster JSON library, recommended with CPython |

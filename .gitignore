@@ -5,6 +5,7 @@ __pycache__/
 
 # Packaging
 *.egg-info/
+dist/
 
 # Environments
 .env
@@ -24,6 +25,7 @@ pyvenv.cfg
 .vscode/
 .mypy_cache/
 .pytest_cache/
+.coverage
 
 # profiling
 *.prof

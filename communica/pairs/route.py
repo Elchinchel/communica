@@ -29,16 +29,18 @@ __all__ = (
 
 
 class Metadata(TypedDict):
-    id: int
+    id: str
     type: RequestType
     route: str
 
 
 class RouteMessageFlow(ReqRepMessageFlow):
-    __slots__ = ('routes', 'fallback_task_set')
+    __slots__ = ('routes', 'fallback_task_set', '_response_serializers',)
 
     routes: 'dict[str, tuple[RequestHandler, BaseSerializer]]'
     fallback_task_set: 'set[asyncio.Task]'
+
+    _response_serializers: 'dict[str, BaseSerializer]'
 
     def __init__(self):
         super().__init__()
@@ -54,6 +56,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
         if serializer is None:
             serializer = default_serializer
         self.routes[route] = (RequestHandler(handler), serializer)
+        self._response_serializers = {}
 
     def dispatch(self, metadata: Metadata, raw_data: bytes):
         if metadata['type'] < RequestType.RESP_OK:
@@ -70,10 +73,13 @@ class RouteMessageFlow(ReqRepMessageFlow):
             task_set.add(runner_task)
         else:
             try:
-                _, serializer = self.routes[metadata['route']]
+                serializer = self._response_serializers[metadata['route']]
             except KeyError:
-                logger.critical('Got response with nonexistent '
-                               f'route ({metadata["route"]})')
+                # this is possible, for example, after program restart.
+                # just log and skip, cause we don't have a routine,
+                # waiting for this response
+                logger.warning('Got response with not requested '
+                              f'route ({metadata["route"]})')
                 return
             self._handle_response(serializer, metadata, raw_data)
 
@@ -113,9 +119,17 @@ class RouteMessageFlow(ReqRepMessageFlow):
     ) -> bytes:
         request_id, fut = self.create_response_waiter()
 
+        serializer = serializer or default_serializer
+        if (saved_serializer := self._response_serializers.get(route)) is None:
+            self._response_serializers[route] = serializer
+        elif saved_serializer != serializer:
+            raise TypeError('You should always use the same serializer for the '
+                           f'same route ({saved_serializer!r} '
+                            'has already been used earlier)')
+
         await self._connection.send(
             Metadata(id=request_id, type=RequestType.REQ_REP, route=route),
-            (serializer or default_serializer).dump(data)
+            serializer.dump(data)
         )
 
         return await fut
@@ -127,7 +141,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
             data: Any
     ) -> None:
         await self._connection.send(
-            Metadata(id=0, type=RequestType.REQ_THROW, route=route),
+            Metadata(id='', type=RequestType.REQ_THROW, route=route),
             (serializer or default_serializer).dump(data)
         )
 
@@ -221,7 +235,7 @@ class RouteServer(ReqRepServer):
         self._known_clients = {}
         self._client_conn_runners = {}
 
-    def request_handler(
+    def route_handler(
             self,
             route: str,
             serializer: 'BaseSerializer | None' = None

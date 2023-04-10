@@ -3,7 +3,7 @@ import asyncio
 
 from abc import abstractmethod
 from enum import Enum
-from uuid import uuid4
+from uuid import uuid4, uuid1
 from typing import TypedDict, Any, cast
 from inspect import iscoroutinefunction
 from traceback import format_exc
@@ -52,7 +52,7 @@ class ServerHandshakeOk(HandshakeOk):
 
 class Metadata(TypedDict):
     type: RequestType
-    id: int
+    id: str
 
 
 class RequestHandler:
@@ -76,7 +76,7 @@ class ReqRepMessageFlow(HasLoopMixin):
         '_connection', '_id_counter', '_response_waiters'
     )
 
-    _response_waiters: 'dict[int, asyncio.Future]'
+    _response_waiters: 'dict[str, asyncio.Future]'
 
     def __init__(self):
         self._id_counter = cycle_range(*INT32RANGE)
@@ -90,7 +90,7 @@ class ReqRepMessageFlow(HasLoopMixin):
         return self._connection
 
     def create_response_waiter(self):
-        request_id = next(self._id_counter)
+        request_id = uuid1().hex
 
         fut = self._get_loop().create_future()
         self._response_waiters[request_id] = fut
@@ -112,7 +112,13 @@ class ReqRepMessageFlow(HasLoopMixin):
         req_type = metadata['type']
 
         if req_type == RequestType.RESP_OK:
-            fut.set_result(serializer.load(raw_data))
+            try:
+                fut.set_result(serializer.load(raw_data))
+            except Exception as e:
+                # if serializer can't load response, considering this
+                # requester's error, cause responder can't do
+                # anything about it after sending response
+                fut.set_exception(e)
             return
 
         data = default_serializer.load(raw_data)
@@ -204,7 +210,7 @@ class SimpleMessageFlow(ReqRepMessageFlow):
 
     async def throw(self, data: Any) -> None:
         await self._connection.send(
-            Metadata(id=0, type=RequestType.REQ_THROW),
+            Metadata(id='', type=RequestType.REQ_THROW),
             self.serializer.dump(data)
         )
 
@@ -245,15 +251,9 @@ class ReqRepClient(BaseClient):
 
     async def close(self) -> None:
         if self._run_task is not None:
-            self._run_task.cancel()
             await self._flow._connection.close()
+            self._run_task.cancel()
         self.stop()
-
-    # def _on_conn_fail(self, task: asyncio.Task):
-    #     if task.cancelled():
-    #         return
-    #     if (exc := task.exception()):
-    #         logger.error('Unhandled exception in connection runner: {exc!r}')
 
     async def _connection_keeper(self):
         while True:
@@ -342,11 +342,13 @@ class ReqRepServer(BaseServer):
 
     async def close(self) -> None:
         for client_id, flow in self._known_clients.items():
-            if (conn_task := self._client_conn_runners.get(client_id)):
-                conn_task.cancel()
             if isinstance(flow, ReqRepMessageFlow):
                 self._cancel_handler_tasks(flow)
                 await flow._connection.close()
+            # XXX: проблемы с RMQ коннектором: отмена conn.close()
+            # вызывает повторную отправку Close фрейма, что ломает соединение
+            if (conn_task := self._client_conn_runners.get(client_id)):
+                conn_task.cancel()
         self._server.close()
         await self._server.wait_closed()
 
