@@ -46,6 +46,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
         super().__init__()
         self.routes = {}
         self.fallback_task_set = set()
+        self._response_serializers = {}
 
     def update_route(
             self,
@@ -56,7 +57,6 @@ class RouteMessageFlow(ReqRepMessageFlow):
         if serializer is None:
             serializer = default_serializer
         self.routes[route] = (RequestHandler(handler), serializer)
-        self._response_serializers = {}
 
     def dispatch(self, metadata: Metadata, raw_data: bytes):
         if metadata['type'] < RequestType.RESP_OK:
