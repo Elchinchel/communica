@@ -1,4 +1,0 @@
-[run]
-branch = True
-source = communica, tests
-omit = site-packages

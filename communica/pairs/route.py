@@ -1,17 +1,15 @@
 import asyncio
 
 from uuid import uuid4
-from typing import (
-    Callable, Protocol, TypedDict, Any, cast
-)
+from typing import TypedDict, Any, cast
 
-from communica.exceptions import RequesterError, ResponderError
+from communica.exceptions import ReqError, RespError
 from communica.serializers import BaseSerializer, default_serializer
 from communica.connectors.base import (
     BaseConnection, BaseConnector,
     HandshakeOk, HandshakeFail, HandshakeGen
 )
-from communica.utils import logger
+from communica.utils import TaskSet, logger
 
 
 from communica.pairs.base import SyncHandlerType, AsyncHandlerType
@@ -38,14 +36,14 @@ class RouteMessageFlow(ReqRepMessageFlow):
     __slots__ = ('routes', 'fallback_task_set', '_response_serializers',)
 
     routes: 'dict[str, tuple[RequestHandler, BaseSerializer]]'
-    fallback_task_set: 'set[asyncio.Task]'
+    fallback_task_set: TaskSet
 
     _response_serializers: 'dict[str, BaseSerializer]'
 
     def __init__(self):
         super().__init__()
         self.routes = {}
-        self.fallback_task_set = set()
+        self.fallback_task_set = TaskSet()
         self._response_serializers = {}
 
     def update_route(
@@ -67,15 +65,14 @@ class RouteMessageFlow(ReqRepMessageFlow):
                 route_handle = None
                 task_set = self.fallback_task_set
 
-            runner_task = self._get_loop().create_task(
-                self.handle_request(route_handle, metadata, raw_data))
-            runner_task.add_done_callback(task_set.discard)
-            task_set.add(runner_task)
+            task_set.create_task_with_exc_log(
+                self.handle_request(route_handle, metadata, raw_data)
+            )
         else:
             try:
                 serializer = self._response_serializers[metadata['route']]
             except KeyError:
-                # this is possible, for example, after program restart.
+                # this is possible after program restart.
                 # just log and skip, cause we don't have a routine,
                 # waiting for this response
                 logger.warning('Got response with not requested '
@@ -95,19 +92,17 @@ class RouteMessageFlow(ReqRepMessageFlow):
                 handler, req_meta, serializer.load(raw_data)
             )
         else:
+            serializer = default_serializer
             resp_meta = req_meta.copy()
             resp_data = {'msg': f'Route "{req_meta["route"]}" not exists'}
             resp_meta['type'] = RequestType.RESP_ERR_REQUESTER
 
-        req_type = req_meta['type']
-        resp_type = resp_meta['type']
+        if req_meta['type'] == RequestType.REQ_REP:
+            await self._connection.send(
+                resp_meta, serializer.dump(resp_data)
+            )
 
-        if resp_type == RequestType.RESP_OK:
-            if req_type == RequestType.REQ_REP:
-                await self._connection.send(
-                    resp_meta, serializer.dump(resp_data))  # pyright: reportUnboundVariable=false
-
-        elif req_type == RequestType.REQ_THROW:
+        elif resp_meta['type'] > RequestType.RESP_ERR_UNKNOWN:
             logger.warning('Error occured while handling request, but '
                            'requester don\'t know about this:\n' + resp_data['msg'])
 
@@ -117,12 +112,12 @@ class RouteMessageFlow(ReqRepMessageFlow):
             serializer: 'BaseSerializer | None',
             data: Any
     ) -> bytes:
-        request_id, fut = self.create_response_waiter()
+        request_id, fut = self._create_response_waiter()
 
         serializer = serializer or default_serializer
         if (saved_serializer := self._response_serializers.get(route)) is None:
             self._response_serializers[route] = serializer
-        elif saved_serializer != serializer:
+        elif saved_serializer is not serializer:
             raise TypeError('You should always use the same serializer for the '
                            f'same route ({saved_serializer!r} '
                             'has already been used earlier)')
@@ -151,7 +146,7 @@ class RouteClient(ReqRepClient):
     Pair for RouteServer.
     """
 
-    __slots__ = ('_routes',)
+    __slots__ = ()
 
     _flow: RouteMessageFlow
 
@@ -163,7 +158,6 @@ class RouteClient(ReqRepClient):
         super().__init__(connector)
 
         self._flow = RouteMessageFlow()
-        self._routes = []
 
         self._run_task = None
         self._client_id = client_id or uuid4().hex
@@ -182,7 +176,6 @@ class RouteClient(ReqRepClient):
         """
         def decorator(endpoint: 'SyncHandlerType | AsyncHandlerType'):
             self._flow.update_route(route, endpoint, serializer)
-            self._routes.append((route, endpoint, serializer))
 
         return decorator
 
@@ -256,13 +249,10 @@ class RouteServer(ReqRepServer):
         return decorator
 
     def _cancel_handler_tasks(self, flow: RouteMessageFlow):
-        for task in flow.fallback_task_set:
-            task.cancel()
+        flow.fallback_task_set.cancel()
 
         for handler, _ in flow.routes.values():
-            for task in handler.running_tasks:
-                if task is not asyncio.tasks.current_task():
-                    task.cancel()
+            handler.running_tasks.cancel()
 
     def _on_client_connect(self, connection: BaseConnection):
         loop = self._get_loop()

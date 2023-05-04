@@ -1,9 +1,14 @@
+import logging
 import asyncio
 
 import pytest
 
+from communica.utils import logger
 from communica.connectors import *
 from communica.serializers import JsonSerializer
+
+
+logger.setLevel(logging.DEBUG)
 
 
 @pytest.fixture

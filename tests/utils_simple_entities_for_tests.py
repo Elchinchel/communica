@@ -5,7 +5,7 @@ from typing import Iterable
 
 import pytest
 
-from utils import wait_tasks, GatheredContexts  # type: ignore
+from utils_misc import wait_tasks
 from communica.pairs import SimpleClient, SimpleServer
 
 
@@ -85,10 +85,9 @@ async def run_sequential_send_with_simples(connector, serializer):
 
 async def run_concurrent_send_with_simples(connector, serializer):
     async def run(entity, messages, done_event):
-        async with entity:
-            calls = [entity.throw(msg) for msg in messages]
-            await asyncio.gather(*calls)
-            await done_event.wait()
+        calls = [entity.throw(msg) for msg in messages]
+        await asyncio.gather(*calls)
+        await done_event.wait()
 
     cli_checker = MessageExistenceChecker(server_to_client_messages)
     client = SimpleClient(

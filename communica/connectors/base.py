@@ -7,7 +7,7 @@ from typing_extensions import Self
 from communica.utils import logger, json_dumpb, json_loadb
 
 
-HandshakeGen = AsyncGenerator['bytes | HandshakeOk', bytes]
+HandshakeGen = AsyncGenerator['dict | HandshakeOk', dict]
 
 
 class Handshaker(Protocol):
@@ -19,7 +19,7 @@ class ClientConnectedCB(Protocol):
 
 
 class RequestReceivedCB(Protocol):
-    def __call__(self, metadata: Any, raw_data: bytes): ...
+    def __call__(self, metadata: Any, raw_data: memoryview): ...
 
 
 class HandshakeOk: ...
@@ -43,7 +43,7 @@ class BaseConnection(ABC):
     __slots__ = ('_alive', '_handshake_result')
 
     @property
-    def is_alive(self):
+    def is_alive(self) -> bool:
         try:
             return self._alive
         except AttributeError:
@@ -76,9 +76,11 @@ class BaseConnection(ABC):
         handshake_gen = handshaker(self)
 
         async def send_to_gen(data):
+            if data is not None:
+                data = json_loadb(data)
             gen_return = await handshake_gen.asend(data)
-            if isinstance(gen_return, bytes):
-                return gen_return
+            if isinstance(gen_return, dict):
+                return json_dumpb(gen_return)
             elif isinstance(gen_return, HandshakeOk):
                 if hasattr(self, '_handshake_result'):
                     raise RuntimeError('Handshake repeated on same connection')

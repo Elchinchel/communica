@@ -10,7 +10,7 @@ from communica.connectors.base import BaseConnector
 
 
 class BaseEntity(ABC, HasLoopMixin):
-    __slots__ = ('connector', '_stop_event')
+    __slots__ = ('connector', '_closed', '_stop_event')
 
     connector: BaseConnector
 
@@ -23,8 +23,9 @@ class BaseEntity(ABC, HasLoopMixin):
     async def run(self):
         """Run until .stop() is called."""
         if hasattr(self, '_stop_event'):
-            RuntimeError('.run() must be called only once on same object')
+            raise RuntimeError('.run() must be called only once on same object')
 
+        self._closed = asyncio.get_event_loop().create_future()
         self._stop_event = asyncio.Event()
         try:
             async with self:
@@ -32,11 +33,18 @@ class BaseEntity(ABC, HasLoopMixin):
                 await self._stop_event.wait()
         finally:
             del(self._stop_event)
+            self._closed.set_result(None)
 
     def stop(self):
         """If .run() was called, it returns, otherwise this method does nothing"""
         if hasattr(self, '_stop_event'):
             self._stop_event.set()
+
+    async def wait_stop(self):
+        """Call .stop() and wait until closed"""
+        if hasattr(self, '_stop_event'):
+            self.stop()
+            await self._closed
 
     @abstractmethod
     async def init(self) -> Self:

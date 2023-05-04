@@ -2,9 +2,9 @@ import json
 import asyncio
 
 from ssl import SSLContext
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from struct import Struct
-from typing import Optional, Any
+from typing import Sequence, Optional, Any
 
 from typing_extensions import Self
 
@@ -27,6 +27,52 @@ __all__ = (
 )
 
 DEFAULT_STREAM_HWM = 32
+
+
+class Frame(ABC):
+    __slots__ = ()
+
+    CODE: bytes
+
+    _frames = {}
+
+    def __init_subclass__(cls) -> None:
+        cls._frames[cls.CODE] = cls
+
+    @abstractmethod
+    def to_bytes(self) -> bytes:
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def _load(cls, data: Sequence[bytes]):
+        raise NotImplementedError
+
+    @classmethod
+    def from_bytes(cls, data: Sequence[bytes]) -> 'Frame':
+        try:
+            frame = cls._frames[data[0]]
+        except ValueError:
+            raise ValueError('Unknown protocol') from None
+
+        return frame._load(data[1:])
+
+
+class MessageFrame(Frame):
+    CODE = b'\x01'
+
+    _header_packer = Struct(
+        '!I'  # message length
+         'H'  # data start index
+    )
+    _pack_header = _header_packer.pack
+    _header_size = _header_packer.size
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def to_bytes(self) -> bytes:
+        return self.CODE + b''
 
 
 class StreamConnection(BaseConnection):
@@ -96,20 +142,19 @@ class StreamConnection(BaseConnection):
         header_unpack = self._header_packer.unpack
 
         write_task = asyncio.create_task(self._send_runner())
-
         try:
             while not is_closing():
                 header = await readexactly(header_size)
                 chunk_len, data_start = header_unpack(header)
-                chunk = await readexactly(chunk_len)
+                chunk = memoryview(await readexactly(chunk_len))
 
-                # XXX: попробовать с memoryview
                 request_received_cb(json_loadb(chunk[:data_start]), chunk[data_start:])
         except Exception as e:
-            logger.debug(f'Connection broken: {e!r}')
+            logger.debug('Connection broken: %r', e)
             raise
         finally:
             write_task.cancel()
+            await asyncio.wait([write_task])
 
         return None
 
@@ -201,10 +246,6 @@ class TcpConnector(BaseStreamConnector):
     __slots__ = ('host', 'port', 'ssl')
 
     def __init__(self, host: str, port: int, ssl: Optional[SSLContext] = None):
-        import warnings
-        warnings.warn(
-            'This connector unstable and may lead to message loss'
-        )
         self.host = host
         self.port = port
         self.ssl = ssl

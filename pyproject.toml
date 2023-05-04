@@ -1,6 +1,6 @@
 [project]
 name = "communica"
-version = "0.1.4.post1"
+version = "0.2.0"
 authors = [
   { name="Elchin Sarkarov", email="elchin751@gmail.com" },
 ]
@@ -17,6 +17,8 @@ classifiers = [
 dependencies = ["typing-extensions"]
 
 [project.optional-dependencies]
+test = [ "pytest", "pytest-cov", "pytest-asyncio" ]
+
 df = ["dataclass-factory"]
 orjson = ["orjson"]
 pydantic = ["pydantic"]

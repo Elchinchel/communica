@@ -1,8 +1,9 @@
 from os import getenv
 from typing import Any, TypeVar, Generic
 from logging import getLogger
-from asyncio import get_running_loop, CancelledError
 from inspect import isclass, isfunction, ismethod
+from asyncio import get_running_loop, current_task, CancelledError, Task
+from traceback import format_exception
 from collections import deque
 
 
@@ -21,7 +22,6 @@ UINT16MAX = 2**16 - 1
 INT32RANGE = (-2**31, 2**31 - 1)
 
 
-# XXX: оно того стоит?
 try:
     import orjson
 
@@ -46,6 +46,31 @@ class HasLoopMixin:
         except AttributeError:
             self._loop = get_running_loop()
             return self._loop
+
+
+class TaskSet(HasLoopMixin):
+    tasks: 'set[Task]'
+
+    def __init__(self) -> None:
+        self.tasks = set()
+
+    def create_task(self, coro) -> Task:
+        task = self._get_loop().create_task(coro)
+        task.add_done_callback(self.tasks.discard)
+        self.tasks.add(task)
+        return task
+
+    def create_task_with_exc_log(self, coro):
+        task = self.create_task(coro)
+        task.add_done_callback(exc_log_callback)
+        return task
+
+    def cancel(self):
+        "Cancel all tasks except current"
+        cur_task = current_task()
+        for task in self.tasks:
+            if task is not cur_task:
+                task.cancel()
 
 
 class MessageQueue(HasLoopMixin, Generic[_TV]):
@@ -101,6 +126,17 @@ class MessageQueue(HasLoopMixin, Generic[_TV]):
                 break
 
         return self._queue.popleft()
+
+
+def exc_log_callback(task: Task):
+    if not task.cancelled() and (exc := task.exception()):
+        tb = format_exception(type(exc), exc, exc.__traceback__)
+        logger.warning('Uncaught exception in %r:\n%s', task, tb)
+
+
+def _time_print(*args):  # pragma: no cover
+    import time
+    print(round(time.monotonic(), 3), *args)
 
 
 def iscallable(obj):
