@@ -34,7 +34,7 @@ if not hasattr(asyncio, 'open_unix_connection'):
     ) -> 'tuple[asyncio.StreamReader, asyncio.StreamWriter]':
         loop = asyncio.get_event_loop()
         if not hasattr(loop, 'create_pipe_connection'):
-            raise TypeError('Named pipes are not supported')
+            raise TypeError('Named pipes are not supported on current platform')
 
         reader = asyncio.StreamReader(loop=loop)
         protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
@@ -48,7 +48,7 @@ if not hasattr(asyncio, 'open_unix_connection'):
     ) -> asyncio.AbstractServer:
         loop = asyncio.get_event_loop()
         if not hasattr(loop, 'start_serving_pipe'):
-            raise TypeError('Named pipes are not supported')
+            raise TypeError('Named pipes are not supported on current platform')
 
         def factory():
             reader = asyncio.StreamReader(loop=loop)
@@ -71,7 +71,7 @@ else:
     async def open_connection(
             address: str
     ) -> 'tuple[asyncio.StreamReader, asyncio.StreamWriter]':
-        sock_path = os.path.join(SOCK_DIR, address)
+        sock_path = format_address(address)
         return await asyncio.open_unix_connection(sock_path)
 
     async def start_server(
