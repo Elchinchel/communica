@@ -1,6 +1,6 @@
 [project]
 name = "communica"
-version = "0.2.0"
+version = "0.2.1b3"
 authors = [
   { name="Elchin Sarkarov", email="elchin751@gmail.com" },
 ]
@@ -21,6 +21,7 @@ test = [ "pytest", "pytest-cov", "pytest-asyncio" ]
 
 df = ["dataclass-factory"]
 orjson = ["orjson"]
+adaptix = ["adaptix"]
 pydantic = ["pydantic"]
 rabbitmq = ["aiormq", "yarl"]
 

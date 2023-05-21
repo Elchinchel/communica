@@ -1,4 +1,4 @@
-import json
+import random
 import asyncio
 
 from abc import abstractmethod
@@ -9,17 +9,16 @@ from inspect import iscoroutinefunction
 from traceback import format_exc
 from dataclasses import dataclass
 
-from communica.exceptions import ReqError, RespError, UnknownError
 from communica.serializers import BaseSerializer, default_serializer
+from communica.exceptions import (
+    ReqError, RespError, UnknownError, SerializerError
+)
 from communica.connectors.base import (
     BaseConnection, BaseConnector,
     HandshakeOk, HandshakeGen
 )
 from communica.utils import (
-    cycle_range, iscallable,
-    HasLoopMixin, TaskSet,
-    INT32RANGE,
-    logger
+    HasLoopMixin, TaskSet, iscallable, logger
 )
 
 from communica.pairs.base import (
@@ -43,6 +42,7 @@ class RequestType(int, Enum):
     RESP_ERR_UNKNOWN = 30
 
     RESP_ERR_REQUESTER = 41
+    RESP_ERR_DATA_LOAD = 42
 
     RESP_ERR_RESPONDER = 51
 
@@ -75,13 +75,12 @@ class RequestHandler:
 
 class ReqRepMessageFlow(HasLoopMixin):
     __slots__ = (
-        '_connection', '_id_counter', '_response_waiters'
+        '_connection', '_response_waiters'
     )
 
     _response_waiters: 'dict[str, asyncio.Future]'
 
     def __init__(self):
-        self._id_counter = cycle_range(*INT32RANGE)
         self._response_waiters = {}
 
     def update_connection(self, connection: BaseConnection):
@@ -130,6 +129,8 @@ class ReqRepMessageFlow(HasLoopMixin):
             fut.set_exception(RespError.from_dict(data))
         elif req_type == RequestType.RESP_ERR_UNKNOWN:
             fut.set_exception(UnknownError.from_dict(data))
+        elif req_type == RequestType.RESP_ERR_DATA_LOAD:
+            fut.set_exception(SerializerError.from_dict(data))
         else:
             logger.critical(f"{metadata = }, wtf")
             fut.set_exception(
@@ -139,10 +140,19 @@ class ReqRepMessageFlow(HasLoopMixin):
     async def _handle_request(
             self,
             handler: RequestHandler,
+            serializer: BaseSerializer,
             metadata: Metadata,
-            data: Any
+            raw_data: Any
     ) -> 'tuple[dict, Any]':
         resp_meta = metadata.copy()
+
+        try:
+            data = serializer.load(raw_data)
+            print(data)
+        except Exception as e:
+            resp_meta['type'] = RequestType.RESP_ERR_DATA_LOAD
+            resp_data = SerializerError(repr(e)).to_dict()
+            return resp_meta, resp_data  # type: ignore
 
         try:
             if handler.is_async:
@@ -165,6 +175,33 @@ class ReqRepMessageFlow(HasLoopMixin):
 
         return resp_meta, resp_data  # type: ignore
 
+    async def _send_response(
+            self,
+            req_meta,
+            resp_meta,
+            resp_data,
+            serializer: BaseSerializer
+    ):
+        if req_meta['type'] == RequestType.REQ_REP:
+            if resp_meta['type'] > RequestType.RESP_OK:
+                serializer = default_serializer
+
+            try:
+                raw_data = serializer.dump(resp_data)
+            except Exception:
+                logger.error('Can\'t serialize response:\n%s', format_exc())
+
+                raw_data = default_serializer.dump(
+                    RespError('Response serialize error').to_dict()
+                )
+                resp_meta['type'] = RequestType.RESP_ERR_RESPONDER
+
+            await self._connection.send(resp_meta, raw_data)
+
+        elif resp_meta['type'] > RequestType.RESP_ERR_UNKNOWN:
+            logger.warning('Error occured while handling request, but '
+                           'requester don\'t know about this:\n' + resp_data['msg'])
+
 
 class SimpleMessageFlow(ReqRepMessageFlow):
     __slots__ = ('handler', 'serializer')
@@ -180,26 +217,19 @@ class SimpleMessageFlow(ReqRepMessageFlow):
 
     def dispatch(self, metadata: Metadata, raw_data: bytes):
         if metadata['type'] < RequestType.RESP_OK:
-            data = self.serializer.load(raw_data)
             self.handler.running_tasks.create_task_with_exc_log(
-                self.handle_request(metadata, data)
+                self.handle_request(metadata, raw_data)
             )
         else:
             self._handle_response(self.serializer, metadata, raw_data)
 
-    async def handle_request(self, req_meta: Metadata, data: Any):
+    async def handle_request(self, req_meta: Metadata, raw_data: bytes):
         resp_meta, resp_data = await self._handle_request(
-            self.handler, req_meta, data
+            self.handler, self.serializer, req_meta, raw_data
         )
-
-        if req_meta['type'] == RequestType.REQ_REP:
-            await self._connection.send(
-                resp_meta, self.serializer.dump(resp_data)
-            )
-
-        elif resp_meta['type'] > RequestType.RESP_ERR_UNKNOWN:
-            logger.warning('Error occured while handling request, but '
-                           'requester don\'t know about this:\n' + resp_data['msg'])
+        await self._send_response(
+            req_meta, resp_meta, resp_data, self.serializer
+        )
 
     async def request(self, data: Any) -> bytes:
         request_id, fut = self._create_response_waiter()
@@ -289,7 +319,7 @@ class ReqRepClient(BaseClient):
 
 class SimpleClient(ReqRepClient):
     """
-    Работает в паре с SimpleServer.
+    Pair to SimpleServer.
 
     Has only one optional request handler.
     """
@@ -366,15 +396,9 @@ class ReqRepServer(BaseServer):
 
     async def _get_client_flow(self, client_id: 'str | None') -> Any:
         if client_id is None:
-            while not self._known_clients:
+            while not (connected := self._get_connected_clients()):
                 await asyncio.sleep(1)
-
-            import random  # XXX
-
-            flow = random.choice(list(self._known_clients.values()))
-            if isinstance(flow, ReqRepMessageFlow):
-                return flow
-            return await flow
+            return random.choice(connected)
 
         flow = self._known_clients.get(client_id)
         if not isinstance(flow, ReqRepMessageFlow):
@@ -382,6 +406,12 @@ class ReqRepServer(BaseServer):
                 self._known_clients[client_id] = self._get_loop().create_future()
             flow = await self._known_clients[client_id]  # type: ignore
         return flow
+
+    def _get_connected_clients(self):
+        return [
+            flow for flow in self._known_clients.values()
+                if not isinstance(flow, asyncio.Future)
+        ]
 
     def _on_conn_fail(self, task: asyncio.Task):
         if task.cancelled():
@@ -400,7 +430,7 @@ class ReqRepServer(BaseServer):
 
 class SimpleServer(ReqRepServer):
     """
-    Работает в паре с SimpleClient.
+    Pair to SimpleClient.
 
     Has only one request handler.
     """
@@ -446,12 +476,12 @@ class SimpleServer(ReqRepServer):
         task.add_done_callback(self._on_conn_fail)
         self._client_conn_runners[client_id] = task
 
-    async def request(self, data: Any, client_id: 'str | None' = None) -> bytes:
+    async def request(self, data: Any, client_id: 'str | None' = None) -> Any:
         """
         Send request, wait response.
 
         Args:
-            client_id: If omitted or None, random client will be chosen
+            client_id: If omitted or None, random connected client will be chosen.
         """
         flow = await self._get_client_flow(client_id)
         return await flow.request(data)
@@ -461,7 +491,7 @@ class SimpleServer(ReqRepServer):
         Send request without waiting response.
 
         Args:
-            client_id: If omitted or None, random client will be chosen
+            client_id: If omitted or None, random connected client will be chosen.
         """
         flow = await self._get_client_flow(client_id)
         return await flow.throw(data)

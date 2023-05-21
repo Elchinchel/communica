@@ -3,14 +3,13 @@ import asyncio
 from uuid import uuid4
 from typing import TypedDict, Any, cast
 
-from communica.exceptions import ReqError, RespError
+from communica.utils import TaskSet, logger
+from communica.exceptions import ReqError, RespError, SerializerError
 from communica.serializers import BaseSerializer, default_serializer
 from communica.connectors.base import (
     BaseConnection, BaseConnector,
     HandshakeOk, HandshakeFail, HandshakeGen
 )
-from communica.utils import TaskSet, logger
-
 
 from communica.pairs.base import SyncHandlerType, AsyncHandlerType
 from communica.pairs.simple import (
@@ -71,10 +70,11 @@ class RouteMessageFlow(ReqRepMessageFlow):
         else:
             try:
                 serializer = self._response_serializers[metadata['route']]
-            except KeyError:
+            except KeyError:  # pragma: no cover
                 # this is possible after program restart.
                 # just log and skip, cause we don't have a routine,
                 # waiting for this response
+                # XXX: should we log?
                 logger.warning('Got response with not requested '
                               f'route ({metadata["route"]})')
                 return
@@ -89,22 +89,16 @@ class RouteMessageFlow(ReqRepMessageFlow):
         if route_handle is not None:
             handler, serializer = route_handle
             resp_meta, resp_data = await self._handle_request(
-                handler, req_meta, serializer.load(raw_data)
+                handler, serializer, req_meta, raw_data
             )
         else:
             serializer = default_serializer
             resp_meta = req_meta.copy()
-            resp_data = {'msg': f'Route "{req_meta["route"]}" not exists'}
             resp_meta['type'] = RequestType.RESP_ERR_REQUESTER
+            resp_data = \
+                ReqError(f'Route "{req_meta["route"]}" not exists').to_dict()
 
-        if req_meta['type'] == RequestType.REQ_REP:
-            await self._connection.send(
-                resp_meta, serializer.dump(resp_data)
-            )
-
-        elif resp_meta['type'] > RequestType.RESP_ERR_UNKNOWN:
-            logger.warning('Error occured while handling request, but '
-                           'requester don\'t know about this:\n' + resp_data['msg'])
+        await self._send_response(req_meta, resp_meta, resp_data, serializer)
 
     async def request(
             self,
@@ -118,8 +112,8 @@ class RouteMessageFlow(ReqRepMessageFlow):
         if (saved_serializer := self._response_serializers.get(route)) is None:
             self._response_serializers[route] = serializer
         elif saved_serializer is not serializer:
-            raise TypeError('You should always use the same serializer for the '
-                           f'same route ({saved_serializer!r} '
+            raise TypeError('You should always use the same serializer for '
+                           f'the same route ({saved_serializer!r} '
                             'has already been used earlier)')
 
         await self._connection.send(
@@ -144,6 +138,8 @@ class RouteMessageFlow(ReqRepMessageFlow):
 class RouteClient(ReqRepClient):
     """
     Pair for RouteServer.
+
+    Handler searched by exact match of route string.
     """
 
     __slots__ = ()
@@ -213,6 +209,8 @@ class RouteClient(ReqRepClient):
 class RouteServer(ReqRepServer):
     """
     Pair for RouteClient.
+
+    Handler searched by exact match of route string.
     """
 
     __slots__ = ('_routes',)
@@ -280,13 +278,14 @@ class RouteServer(ReqRepServer):
             data: Any,
             serializer: 'BaseSerializer | None' = None,
             client_id: 'str | None' = None
-    ) -> bytes:
+    ) -> Any:
         """
         Send request, wait response.
 
         Args:
-            route: Handler identifier
-            client_id: If omitted or None, random client will be chosen
+            route: Handler identifier.
+            client_id: If omitted or None, random connected client will be chosen.
+            serializer: Defaults to JsonSerializer.
         """
         flow = await self._get_client_flow(client_id)
         return await flow.request(route, serializer, data)
@@ -302,8 +301,9 @@ class RouteServer(ReqRepServer):
         Send request without waiting response.
 
         Args:
-            route: Handler identifier
-            client_id: If omitted or None, random client will be chosen
+            route: Handler identifier.
+            client_id: If omitted or None, random connected client will be chosen.
+            serializer: Defaults to JsonSerializer.
         """
         flow = await self._get_client_flow(client_id)
         return await flow.throw(route, serializer, data)

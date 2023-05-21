@@ -25,7 +25,13 @@ INT32RANGE = (-2**31, 2**31 - 1)
 try:
     import orjson
 
-    json_dumpb = orjson.dumps  # type: ignore
+    _orjson_option = (
+        orjson.OPT_NON_STR_KEYS
+    )
+
+    def json_dumpb(obj: Any) -> bytes:
+        return orjson.dumps(obj, option=_orjson_option)
+
     json_loadb = orjson.loads
 
 except ImportError:

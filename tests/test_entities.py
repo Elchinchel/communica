@@ -5,12 +5,15 @@ import asyncio
 import pytest
 
 from communica.pairs.base import BaseEntity
-from communica.exceptions import ReqError, RespError, UnknownError
+from communica.serializers import AdaptixSerializer
 from communica.pairs import (
     SimpleClient, SimpleServer, RouteClient, RouteServer
 )
+from communica.exceptions import (
+    ReqError, RespError, UnknownError, SerializerError
+)
 
-from utils_misc import wait_tasks
+from utils_misc import wait_tasks, dummy_handler, wait_second
 from utils_simple_entities_for_tests import(
     MessageExistenceChecker,
     client_to_server_messages, server_to_client_messages,
@@ -55,16 +58,16 @@ class TestSimpleEntities:
 
         async with server, client:
             with pytest.raises(UnknownError, match=r'ValueError.+hello'):
-                await asyncio.wait_for(client.request(1), timeout=1)
+                await wait_second(client.request(1))
 
             try:
-                await asyncio.wait_for(client.request(2), timeout=1)
+                await wait_second(client.request(2))
             except RespError as e:
                 assert e.code == 500
                 assert e.message == 'im sorry'
 
             try:
-                await asyncio.wait_for(client.request(3), timeout=1)
+                await wait_second(client.request(3))
             except ReqError as e:
                 assert e.code == 404
                 assert e.message == 'dude no such data'
@@ -97,26 +100,73 @@ class TestRouteEntities:
 
         async with server, client:
             with pytest.raises(UnknownError, match=r'ValueError.+hello'):
-                await asyncio.wait_for(client.request('1', None), timeout=1)
+                await wait_second(client.request('1', None))
 
             try:
-                await asyncio.wait_for(client.request('2', None), timeout=1)
+                await wait_second(client.request('2', None))
             except RespError as e:
                 assert e.code == 500
                 assert e.message == 'im sorry'
 
             try:
-                await asyncio.wait_for(client.request('3', None), timeout=1)
+                await wait_second(client.request('3', None))
             except ReqError as e:
                 assert e.code == 404
                 assert e.message == 'dude no such data'
 
+    async def test_bad_route(self, connector):
+        client = RouteClient(connector)
+        server = RouteServer(connector)
+
+        async with server, client:
+            with pytest.raises(ReqError):
+                await wait_second(client.request('', None))
+
+    async def test_flow_update(self, connector):
+        client = RouteClient(connector)
+        server = RouteServer(connector)
+
+        server.route_handler('existed')(dummy_handler)
+
+        async with server, client:
+            await wait_second(client.request('existed', None))
+
+            server.route_handler('new')(dummy_handler)
+
+            await wait_second(client.request('new', None))
+
+    async def test_bad_serializer(self, connector):
+        client = RouteClient(connector)
+        server = RouteServer(connector)
+
+        @server.route_handler(
+            'hello',
+            AdaptixSerializer(request_model=str)
+        )
+        async def handler(data: str):
+            assert isinstance(data, str)
+
+        async with server, client:
+            await wait_second(client.request('hello', 'test'))
+
+            with pytest.raises(SerializerError):
+                await wait_second(client.request('hello', {}))
+
+            with pytest.raises(TypeError):
+                await wait_second(client.request(
+                    route='hello',
+                    data=None,
+                    serializer=AdaptixSerializer(str)
+                ))
+
     @pytest.mark.asyncio
     async def test_routing(self, connector, serializer):
         async def run(entity: 'RouteClient | RouteServer', messages, done_event):
-            for message in messages:
+            for message in messages[:10]:
                 resp = await entity.request(str(message), message)
                 assert resp == message, 'Response data must be equal to sent'
+            for message in messages[10:]:
+                await entity.throw(str(message), message)
             await done_event.wait()
 
         def add_handler(entity: 'RouteClient | RouteServer', route_id: str, checker):

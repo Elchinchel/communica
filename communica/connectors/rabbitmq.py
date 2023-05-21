@@ -5,9 +5,9 @@ import weakref
 
 try:
     import aiormq
-    _HAS_AIORMQ = True
-except ImportError:
-    _HAS_AIORMQ = False
+    _HAVE_AIORMQ = True
+except ModuleNotFoundError:
+    _HAVE_AIORMQ = False
 else:
     from yarl import URL
 
@@ -603,7 +603,7 @@ class RmqConnector(BaseConnector):
             connect_id (str): unique identifier of connecting process.
               Must be set for clients.
         """
-        if not _HAS_AIORMQ:
+        if not _HAVE_AIORMQ:
             raise ImportError('RmqConnector requires aiormq library. '
                               'Install communica with [rabbitmq] extra.')
 

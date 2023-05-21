@@ -2,6 +2,26 @@ class CommunicaError(Exception):
     """Base exception for all library errors."""
 
 
+class SerializerError(CommunicaError):
+    """Error on loading or dumping data"""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+    @property
+    def message(self):
+        return self.args[0]
+
+    def to_dict(self):
+        return {
+            'message': self.message
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        return cls(data['message'])
+
+
 class _RequestsErr(CommunicaError):
     def __init__(self, message: str, code: 'int | None' = None) -> None:
         super().__init__(message, code)
