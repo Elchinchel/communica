@@ -180,7 +180,7 @@ class RouteClient(ReqRepClient):
             route: str,
             data: Any,
             serializer: 'BaseSerializer | None' = None
-    ) -> bytes:
+    ) -> Any:
         """
         Send request, wait response.
 

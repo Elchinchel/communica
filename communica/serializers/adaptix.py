@@ -18,6 +18,12 @@ TResp = TypeVar('TResp')
 class AdaptixSerializer(BaseSerializer, Generic[TReq, TResp]):
     __slots__ = ('_retort', '_req_model', '_resp_model')
 
+    # XXX: один из вариантов
+    # FROM_HANDLER = специальное значение
+    # если регистратор ручки видит это значение вместо сериалайзера,
+    # он берет ручку и через какой-нибудь метод собирает сериалайзер
+    # по сигнатуре ручки
+
     def __init__(
             self,
             request_model: Type[TReq],

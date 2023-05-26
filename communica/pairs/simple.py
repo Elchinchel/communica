@@ -351,7 +351,7 @@ class SimpleClient(ReqRepClient):
     def _not_defined_handler(self, data: Any):
         raise RespError('Client side not defined handler for server requests')
 
-    async def request(self, data: Any) -> bytes:
+    async def request(self, data: Any) -> Any:
         """Send request, wait response."""
         return await self._flow.request(data)
 
@@ -374,6 +374,9 @@ class ReqRepServer(BaseServer):
         return self
 
     async def close(self) -> None:
+        if not hasattr(self, '_server'):
+            return
+
         self._server.close()
         await self._server.wait_closed()
 
