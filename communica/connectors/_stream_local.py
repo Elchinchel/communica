@@ -63,10 +63,13 @@ if not hasattr(asyncio, 'open_unix_connection'):
         return '\\\\.\\pipe\\' + 'communica.' + address
 
 else:
+    import os
     import os.path
     import tempfile
 
     SOCK_DIR = os.path.join(tempfile.gettempdir(), 'communica')
+    if not os.path.exists(SOCK_DIR):
+        os.makedirs(SOCK_DIR)
 
     async def open_connection(
             address: str

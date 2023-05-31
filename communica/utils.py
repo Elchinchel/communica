@@ -112,6 +112,7 @@ class MessageQueue(HasLoopMixin, Generic[_TV]):
 
         if self._get_waiter is not None:
             self._get_waiter.set_result(True)
+            self._get_waiter = None
 
         self._queue.append(item)
 
@@ -120,11 +121,13 @@ class MessageQueue(HasLoopMixin, Generic[_TV]):
             if self._get_waiter is not None:
                 raise RuntimeError('Duplicate get from queue')
 
+            waiter = self._get_loop().create_future()
             try:
-                self._get_waiter = self._get_loop().create_future()
+                self._get_waiter = waiter
                 await self._get_waiter
             finally:
-                self._get_waiter = None
+                if self._get_waiter is waiter:
+                    self._get_waiter = None
 
         while self._put_waiters:
             if not (waiter := self._put_waiters.popleft()).done():
@@ -137,7 +140,7 @@ class MessageQueue(HasLoopMixin, Generic[_TV]):
 def exc_log_callback(task: Task):
     if not task.cancelled() and (exc := task.exception()):
         tb = format_exception(type(exc), exc, exc.__traceback__)
-        logger.warning('Uncaught exception in %r:\n%s', task, tb)
+        logger.warning('Uncaught exception in %r:\n%s', task, '\n'.join(tb))
 
 
 def _time_print(*args):  # pragma: no cover
