@@ -47,10 +47,18 @@ class TestRmqConnector:
             assert not client._flow._connection.is_alive
 
             await asyncio.sleep(2)
-
             create_task(server.run())
+            # reconnect to restarted server
+            while not client._flow._connection.is_alive:
+                await asyncio.sleep(0.5)
 
-            await asyncio.sleep(1)
+            assert client._flow._connection.is_alive
+
+        assert not client._flow._connection.is_alive
+
+        # reconnect to running server
+        async with SimpleClient(connector) as client:
+            await asyncio.sleep(2)
 
             assert client._flow._connection.is_alive
 

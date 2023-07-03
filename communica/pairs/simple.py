@@ -288,16 +288,20 @@ class ReqRepClient(BaseClient):
             self._run_task.cancel()
 
     async def _connection_keeper(self):
+        reconnect_delay = 0.2
         while True:
             try:
                 new_conn = await self.connector.client_connect(self._handshaker)
             except Exception as e:
-                logger.warning('Connect failed: %s', repr(e))
-                await asyncio.sleep(1)
+                logger.warning('%r: Connect failed: %r', self.connector, e)
+                await asyncio.sleep(reconnect_delay)
+                if reconnect_delay < 5:
+                    reconnect_delay += 0.2
                 continue
             else:
                 connection = self._flow.update_connection(new_conn)
                 self.connected_event.set()
+                reconnect_delay = 0.2
 
             try:
                 await connection.run_until_fail(self._flow.dispatch)
