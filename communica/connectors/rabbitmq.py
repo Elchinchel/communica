@@ -175,7 +175,7 @@ class ServerCheckPolicy(ConnectionCheckPolicy):
         while (await self._waiter):
             if (conn := self._conn()) is None:
                 return  # pragma: no cover
-            await conn._send(_MessageType.LISTENING, b'')  # BUG: после реконнекта клиента к серверу всё ломается
+            await conn._send(_MessageType.LISTENING, b'')  # BUG: после реконнекта клиента к серверу всё ломается | нужно подтверждение
             del(conn)  # deleting reference
             if self._handle is None:
                 self._set_handle()

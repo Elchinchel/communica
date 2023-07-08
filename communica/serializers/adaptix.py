@@ -48,3 +48,14 @@ class AdaptixSerializer(BaseSerializer, Generic[TReq, TResp]):
         return json_dumpb(
             self._retort.dump(data, self._resp_model)
         )
+
+    def client_load(self, raw_data: bytes) -> 'TResp | Any':
+        return self._retort.load(
+            json_loadb(raw_data),
+            self._resp_model
+        )
+
+    def client_dump(self, data: TReq) -> bytes:
+        return json_dumpb(
+            self._retort.dump(data, self._req_model)
+        )

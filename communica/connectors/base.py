@@ -141,6 +141,9 @@ class BaseConnector(ABC):
 
     __slots__ = ()
 
+    def __repr__(self) -> str:
+        return f'{type(self).__name__}({self.repr_address()})'
+
     @abstractmethod
     def repr_address(self) -> str:
         raise NotImplementedError

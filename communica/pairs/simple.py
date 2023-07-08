@@ -114,7 +114,7 @@ class ReqRepMessageFlow(HasLoopMixin):
 
         if req_type == RequestType.RESP_OK:
             try:
-                fut.set_result(serializer.load(raw_data))
+                fut.set_result(serializer.client_load(raw_data))
             except Exception as e:
                 # if serializer can't load response, considering this
                 # requester's error, cause responder can't do
@@ -122,7 +122,7 @@ class ReqRepMessageFlow(HasLoopMixin):
                 fut.set_exception(e)
             return
 
-        data = default_serializer.load(raw_data)
+        data = default_serializer.client_load(raw_data)
         if req_type == RequestType.RESP_ERR_REQUESTER:
             fut.set_exception(ReqError.from_dict(data))
         elif req_type == RequestType.RESP_ERR_RESPONDER:
@@ -148,7 +148,6 @@ class ReqRepMessageFlow(HasLoopMixin):
 
         try:
             data = serializer.load(raw_data)
-            print(data)
         except Exception as e:
             resp_meta['type'] = RequestType.RESP_ERR_DATA_LOAD
             resp_data = SerializerError(repr(e)).to_dict()
@@ -236,7 +235,7 @@ class SimpleMessageFlow(ReqRepMessageFlow):
 
         await self._connection.send(
             Metadata(id=request_id, type=RequestType.REQ_REP),
-            self.serializer.dump(data)
+            self.serializer.client_dump(data)
         )
 
         return await fut
@@ -244,7 +243,7 @@ class SimpleMessageFlow(ReqRepMessageFlow):
     async def throw(self, data: Any) -> None:
         await self._connection.send(
             Metadata(id='', type=RequestType.REQ_THROW),
-            self.serializer.dump(data)
+            self.serializer.client_dump(data)
         )
 
 

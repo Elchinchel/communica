@@ -118,7 +118,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
 
         await self._connection.send(
             Metadata(id=request_id, type=RequestType.REQ_REP, route=route),
-            serializer.dump(data)
+            serializer.client_dump(data)
         )
 
         return await fut
@@ -131,7 +131,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
     ) -> None:
         await self._connection.send(
             Metadata(id='', type=RequestType.REQ_THROW, route=route),
-            (serializer or default_serializer).dump(data)
+            (serializer or default_serializer).client_dump(data)
         )
 
 
