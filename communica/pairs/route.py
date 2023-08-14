@@ -74,7 +74,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
                 # this is possible after program restart.
                 # just log and skip, cause we don't have a routine,
                 # waiting for this response
-                # XXX: should we log?
+                # XXX: should it be logged?
                 logger.warning('Got response with not requested '
                               f'route ({metadata["route"]})')
                 return

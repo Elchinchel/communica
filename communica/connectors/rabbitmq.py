@@ -36,12 +36,14 @@ _DEFAULT_EXCHANGE = 'communica'
 class _MessageType(str, Enum):
     CONNECT_REQUEST = 'communica_client_connect'
     CONNECT_RESPONSE = 'communica_client_connect_ok'
+
     HS_NEXT = 'communica_handshake_next'
     HS_FAIL = 'communica_handshake_fail'
     HS_DONE = 'communica_handshake_done'
-    LISTENING = 'listening'
-    MESSAGE = 'message'
+
     CLOSE = 'close'
+    MESSAGE = 'message'
+    LISTENING = 'listening'
 
 
 _connections: '''dict[
@@ -51,8 +53,8 @@ _connections: '''dict[
 
 
 def _closed_exceptions():
-    return (aiormq.exceptions.ChannelClosed,
-            aiormq.exceptions.ConnectionClosed)
+    return (aiormq.exceptions.ChannelClosed,  # pyright: ignore[reportUnboundVariable]
+            aiormq.exceptions.ConnectionClosed)  # pyright: ignore[reportUnboundVariable]
 
 
 class MessageWaiter(HasLoopMixin):

@@ -58,11 +58,21 @@ class Metadata(TypedDict):
 
 
 class RequestHandler:
-    __slots__ = ('is_async', 'endpoint', 'running_tasks')
+    __slots__ = ('_repr', 'is_async', 'endpoint', 'running_tasks')
 
     is_async: bool
     endpoint: 'SyncHandlerType | AsyncHandlerType'
     running_tasks: TaskSet
+
+    def __repr__(self) -> str:
+        try:
+            return self._repr
+        except AttributeError:
+            name = getattr(self.endpoint, '__qualname__',
+                           getattr(self.endpoint, '__name__', 'UNKNOWN'))
+            htype = 'async' if self.is_async else 'sync'
+            self._repr = f'<RequestHandler {htype} endpoint={name}>'
+            return self._repr
 
     def __init__(self, endpoint: 'SyncHandlerType | AsyncHandlerType') -> None:
         if not iscallable(endpoint):
@@ -169,6 +179,7 @@ class ReqRepMessageFlow(HasLoopMixin):
             resp_meta['type'] = RequestType.RESP_ERR_RESPONDER
 
         except Exception as e:
+            logger.error('Unexpected exception in %r', handler, exc_info=True)
             resp_data = UnknownError(repr(e)).to_dict()
             resp_meta['type'] = RequestType.RESP_ERR_UNKNOWN
 

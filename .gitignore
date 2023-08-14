@@ -35,4 +35,5 @@ pyvenv.cfg
 
 # Other
 /test.py
+upload.bat
 coverage.lcov

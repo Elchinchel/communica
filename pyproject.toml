@@ -1,6 +1,6 @@
 [project]
 name = "communica"
-version = "0.2.2a1"
+version = "0.2.2"
 authors = [
   { name="Elchin Sarkarov", email="elchin751@gmail.com" },
 ]
@@ -19,10 +19,8 @@ dependencies = ["typing-extensions"]
 [project.optional-dependencies]
 test = [ "pytest", "pytest-cov", "pytest-asyncio" ]
 
-df = ["dataclass-factory"]
 orjson = ["orjson"]
 adaptix = ["adaptix"]
-pydantic = ["pydantic"]
 rabbitmq = ["aiormq", "yarl"]
 
 [project.urls]
@@ -40,3 +38,4 @@ namespaces=false
 [tool.pyright]
 typeCheckingMode = "basic"
 reportIncompatibleMethodOverride = "warning"
+reportUnnecessaryTypeIgnoreComments = "warning"
