@@ -18,7 +18,7 @@ from communica.connectors.base import (
     HandshakeOk, HandshakeGen
 )
 from communica.utils import (
-    HasLoopMixin, TaskSet, iscallable, logger
+    BackoffDelayer, HasLoopMixin, TaskSet, iscallable, logger
 )
 
 from communica.pairs.base import (
@@ -298,20 +298,19 @@ class ReqRepClient(BaseClient):
             self._run_task.cancel()
 
     async def _connection_keeper(self):
-        reconnect_delay = 0.2
+        delayer = BackoffDelayer(0.1, 5, 2, 0.5)
         while True:
             try:
                 new_conn = await self.connector.client_connect(self._handshaker)
             except Exception as e:
+                # TODO: log successful reconnect
                 logger.warning('%r: Connect failed: %r', self.connector, e)
-                await asyncio.sleep(reconnect_delay)
-                if reconnect_delay < 5:
-                    reconnect_delay += 0.2
+                await delayer.wait()
                 continue
-            else:
-                connection = self._flow.update_connection(new_conn)
-                self.connected_event.set()
-                reconnect_delay = 0.2
+
+            connection = self._flow.update_connection(new_conn)
+            self.connected_event.set()
+            delayer.reset()
 
             try:
                 await connection.run_until_fail(self._flow.dispatch)

@@ -1,8 +1,9 @@
 from os import getenv
+from random import gauss
 from typing import Any, TypeVar, Generic
 from logging import getLogger
 from inspect import isclass, isfunction, ismethod
-from asyncio import get_running_loop, current_task, CancelledError, Task
+from asyncio import get_running_loop, current_task, sleep, CancelledError, Task
 from traceback import format_exception
 from collections import deque
 
@@ -135,6 +136,36 @@ class MessageQueue(HasLoopMixin, Generic[_TV]):
                 break
 
         return self._queue.popleft()
+
+
+class BackoffDelayer:
+    __slots__ = ('start_delay', 'max_delay', 'factor', 'jitter', '_delay')
+
+    def __init__(
+            self,
+            start_delay: float,
+            max_delay: float,
+            factor: float,
+            jitter: float
+    ) -> None:
+        assert factor > 1, 'factor less or equal 1'
+        assert max_delay > start_delay, 'max delay less or equal to start delay'
+        self.factor = factor
+        self.jitter = jitter
+
+        self._delay = start_delay
+        self.max_delay = max_delay
+        self.start_delay = start_delay
+
+    def reset(self):
+        self._delay = self.start_delay
+
+    async def wait(self):
+        await sleep(self._delay)
+        self._delay = gauss(
+            min(self.max_delay, (self._delay * self.factor)),
+            self.jitter
+        )
 
 
 def exc_log_callback(task: Task):
