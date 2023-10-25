@@ -1,3 +1,5 @@
+import threading
+
 from os import getenv
 from random import gauss
 from typing import Any, TypeVar, Generic
@@ -44,15 +46,23 @@ except ImportError:
     json_loadb = json.loads
 
 
+_HasLoopMixin_lock = threading.Lock()
+
+# can be replaced with asyncio.mixins._LoopBoundMixin,
+# but it's not in public API
 class HasLoopMixin:
-    __slots__ = ('_loop',)
+    _bound_loop = None
 
     def _get_loop(self):
-        try:
-            return self._loop
-        except AttributeError:
-            self._loop = get_running_loop()
-            return self._loop
+        loop = get_running_loop()
+
+        if self._bound_loop is None:
+            with _HasLoopMixin_lock:
+                if self._bound_loop is None:
+                    self._bound_loop = loop
+        if loop is not self._bound_loop:
+            raise RuntimeError(f'{self!r} is bound to a different event loop')
+        return loop
 
 
 class TaskSet(HasLoopMixin):

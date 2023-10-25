@@ -1,6 +1,6 @@
 [project]
 name = "communica"
-version = "0.2.3"
+version = "0.2.4"
 authors = [
   { name="Elchin Sarkarov", email="elchin751@gmail.com" },
 ]
@@ -39,3 +39,4 @@ namespaces=false
 typeCheckingMode = "basic"
 reportIncompatibleMethodOverride = "warning"
 reportUnnecessaryTypeIgnoreComments = "warning"
+exclude = ["./build/"]

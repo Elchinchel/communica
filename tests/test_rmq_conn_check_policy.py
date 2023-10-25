@@ -105,4 +105,4 @@ async def test_client_policy():
     del(conn)
     gc.collect()
     await asyncio.sleep(1.1)
-    assert policy._handle.when() < policy._loop.time()
+    assert policy._handle.when() < policy._get_loop().time()

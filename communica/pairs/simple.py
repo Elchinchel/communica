@@ -90,6 +90,10 @@ class ReqRepMessageFlow(HasLoopMixin):
 
     _response_waiters: 'dict[str, asyncio.Future]'
 
+    @property
+    def connection(self):
+        return self._connection
+
     def __init__(self):
         self._response_waiters = {}
 
@@ -316,7 +320,7 @@ class ReqRepClient(BaseClient):
                 await connection.run_until_fail(self._flow.dispatch)
             except Exception as e:
                 logger.error('Unhandled exception '
-                            f'in connection runner: {e!r}')
+                             'in connection runner: %r', e)
             self.connected_event.clear()
             await asyncio.sleep(1)
 
@@ -410,6 +414,7 @@ class ReqRepServer(BaseServer):
         client_id = client_hello['client_id']
         yield ServerHandshakeOk(client_id=client_id)
 
+    # TODO: clear _known_clients
     async def _get_client_flow(self, client_id: 'str | None') -> Any:
         if client_id is None:
             while not (connected := self._get_connected_clients()):
@@ -426,7 +431,7 @@ class ReqRepServer(BaseServer):
     def _get_connected_clients(self):
         return [
             flow for flow in self._known_clients.values()
-                if not isinstance(flow, asyncio.Future)
+                if not isinstance(flow, asyncio.Future) and flow.connection.is_alive
         ]
 
     def _on_conn_fail(self, task: asyncio.Task):
@@ -494,7 +499,7 @@ class SimpleServer(ReqRepServer):
 
     async def request(self, data: Any, client_id: 'str | None' = None) -> Any:
         """
-        Send request, wait response.
+        Send request, wait for response.
 
         Args:
             client_id: If omitted or None, random connected client will be chosen.
@@ -504,7 +509,7 @@ class SimpleServer(ReqRepServer):
 
     async def throw(self, data: Any, client_id: 'str | None' = None) -> None:
         """
-        Send request without waiting response.
+        Send request without waiting for response.
 
         Args:
             client_id: If omitted or None, random connected client will be chosen.
