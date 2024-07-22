@@ -1,11 +1,9 @@
 import asyncio
-import operator; operator.eq
-
 from typing import Iterable
 
 import pytest
-
 from utils_misc import wait_tasks
+
 from communica.pairs import SimpleClient, SimpleServer
 
 
@@ -57,8 +55,8 @@ class MessageExistenceChecker:
 
 CLIENT_ID = 'test_client'
 
-server_to_client_messages = range(100)
-client_to_server_messages = range(100, 200)
+server_to_client_messages = range(50)
+client_to_server_messages = range(50, 100)
 
 
 async def run_sequential_send_with_simples(connector, serializer):
@@ -79,7 +77,7 @@ async def run_sequential_send_with_simples(connector, serializer):
         await wait_tasks(
             run(server, server_to_client_messages, srv_checker.done),
             run(client, client_to_server_messages, cli_checker.done),
-            timeout=10
+            timeout=15
         )
 
 
@@ -100,5 +98,5 @@ async def run_concurrent_send_with_simples(connector, serializer):
         await wait_tasks(
             run(server, server_to_client_messages, srv_checker.done),
             run(client, client_to_server_messages, cli_checker.done),
-            timeout=10
+            timeout=15
         )

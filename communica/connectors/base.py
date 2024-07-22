@@ -1,7 +1,7 @@
 import asyncio
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Protocol, Awaitable, AsyncGenerator
 
-from abc import abstractmethod, ABC
-from typing import Any, Protocol, Callable, Awaitable, AsyncGenerator
 from typing_extensions import Self
 
 from communica.utils import logger, json_dumpb, json_loadb
@@ -92,7 +92,7 @@ class BaseConnection(ABC):
         try:
             # Первый asend должен быть с None
             data_or_result = await send_to_gen(None)
-            if not isinstance(data_or_result, bytes):
+            if isinstance(data_or_result, HandshakeOk):
                 return data_or_result
 
             while True:
@@ -101,7 +101,7 @@ class BaseConnection(ABC):
                 received_data = await recv_message()
 
                 data_or_result = await send_to_gen(received_data)
-                if not isinstance(data_or_result, bytes):
+                if isinstance(data_or_result, HandshakeOk):
                     return data_or_result
         except HandshakeFail:
             raise
@@ -109,7 +109,7 @@ class BaseConnection(ABC):
             raise RuntimeError('Handshake generator must return bytes, '
                                'HandshakeOk or HandshakeFail') from None
         except Exception as error:
-            logger.error('Handshake failed: %r raised %r', handshaker, error)
+            logger.exception('Handshake failed: %r raised %r', handshaker, error)
             raise
         finally:
             await handshake_gen.aclose()
@@ -154,20 +154,6 @@ class BaseConnector(ABC):
             raise ValueError('Wrong connector type: passed string was '
                             f'constructed with "{dump["type"]}", '
                             f'current is "{cls._TYPE}"')
-
-    @abstractmethod
-    def dump_state(self) -> str:
-        """
-        Get a string which can be used to
-        create new connector with .from_state() method
-        """
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def from_state(cls, state: str) -> Self:
-        """Make new connector from string, obtained with .dump_state() method"""
-        raise NotImplementedError
 
     @abstractmethod
     async def server_start(

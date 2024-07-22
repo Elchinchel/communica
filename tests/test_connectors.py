@@ -1,20 +1,16 @@
 import asyncio
 
 import pytest
+from utils_misc import create_task
+from utils_simple_entities_for_tests import (
+    run_concurrent_send_with_simples,
+    run_sequential_send_with_simples,
+)
 
 from communica.clients import SimpleClient
 from communica.servers import SimpleServer
 from communica.connectors import RmqConnector
 from communica.serializers import default_serializer
-
-
-from utils_misc import create_task
-from utils_simple_entities_for_tests import(
-    CLIENT_ID,
-    MessageExistenceChecker, MessageOrderChecker,
-    client_to_server_messages, server_to_client_messages,
-    run_concurrent_send_with_simples, run_sequential_send_with_simples,
-)
 
 
 class FastDyingRmqConnector(RmqConnector):
@@ -27,7 +23,7 @@ class TestRmqConnector:
         connector = FastDyingRmqConnector(
             url='amqp://guest:guest@localhost:5672/',
             address='test',
-            connect_id='test_client'
+            client_id='test_client'
         )
 
         server = SimpleServer(connector, lambda data: None)
@@ -69,7 +65,7 @@ class TestRmqConnector:
         connector = RmqConnector(
             url='amqp://guest:guest@localhost:5672/',
             address='test',
-            connect_id='test_client'
+            client_id='test_client'
         )
 
         await connector.cleanup()

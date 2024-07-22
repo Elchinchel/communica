@@ -1,7 +1,37 @@
-# cursed.
-
 import asyncio
+import logging
 import weakref
+from abc import ABC, abstractmethod
+from enum import Enum
+from uuid import uuid4
+from typing import Any
+from collections import deque
+
+from typing_extensions import Self
+
+from communica.utils import (
+    NULL_CHAR,
+    HasLoopMixin,
+    json_dumpb,
+    json_loadb,
+    read_accessor,
+    exc_log_callback,
+)
+from communica.connectors.base import (
+    Handshaker,
+    BaseConnector,
+    HandshakeFail,
+    BaseConnection,
+    ClientConnectedCB,
+    RequestReceivedCB,
+)
+from communica.connectors.rabbitmq.pool import (
+    ChannelPool,
+    ChannelRoute,
+    PooledChannel,
+    ChannelExpired,
+)
+
 
 try:
     import aiormq
@@ -11,27 +41,11 @@ except ModuleNotFoundError:
 else:
     from yarl import URL
 
-from abc import ABC, abstractmethod
-from enum import Enum
-from typing import Any
-from datetime import datetime, timedelta
-from collections import deque
 
-from typing_extensions import Self
+DEFAULT_EXCHANGE = 'communica'
+DEFAULT_POOL = ChannelPool()
 
-from communica.utils import (
-    NULL_CHAR, HasLoopMixin, json_dumpb, json_loadb,
-    exc_log_callback
-)
-
-from communica.connectors.base import (
-    BaseConnection, BaseConnector,
-    RequestReceivedCB, ClientConnectedCB,
-    Handshaker, HandshakeFail
-)
-
-
-_DEFAULT_EXCHANGE = 'communica'
+logger = logging.getLogger('communica.connectors.rabbitmq')
 
 
 class _MessageType(str, Enum):
@@ -47,43 +61,13 @@ class _MessageType(str, Enum):
     LISTENING = 'listening'
 
 
-_connections: '''dict[
-    URL,
-    aiormq.abc.AbstractConnection | asyncio.Future[aiormq.abc.AbstractConnection]
-]''' = {}
-
-
-def _closed_exceptions():
-    return (aiormq.exceptions.ChannelClosed,  # pyright: ignore[reportUnboundVariable]
-            aiormq.exceptions.ConnectionClosed)  # pyright: ignore[reportUnboundVariable]
-
-
-async def _publish(
-        chan: 'aiormq.abc.AbstractChannel',
-        msg_type: str,
-        body: bytes,
-        exchange: str,
-        routing_key: str,
-        properties_kwargs: 'dict[str, Any]' = {}
-):
-    return await chan.basic_publish(
-        body,
-        exchange=exchange,
-        routing_key=routing_key,
-        properties=aiormq.spec.Basic.Properties(  # pyright: ignore[reportUnboundVariable]
-            message_type=msg_type,
-            **properties_kwargs
-        )
-    )
-
-
 class MessageWaiter(HasLoopMixin):
     __slots__ = ('_waiter', '_messages', '_timeout')
 
     @classmethod
     async def new(
             cls,
-            chan: 'aiormq.abc.AbstractChannel',
+            chan: PooledChannel,
             queue: str,
             *,
             no_ack: bool,
@@ -94,7 +78,7 @@ class MessageWaiter(HasLoopMixin):
         inst._timeout = timeout
         inst._messages = deque()
 
-        await chan.basic_consume(queue, inst._callback, no_ack=no_ack)
+        await chan.consume(queue, inst._callback, no_ack=no_ack)
 
         return inst
 
@@ -244,28 +228,26 @@ class ClientCheckPolicy(ConnectionCheckPolicy):
 
         time_diff = self._get_loop().time() - self._last_message
         if time_diff < self.period:
-            print('RESETTING', int(self._last_message), int(time_diff), self.period, id(self))
             self._set_handle(self.period - time_diff)
             return
 
-        print('CLOSING', int(self._last_message), int(self._get_loop().time()), id(self))
+        logger.info('Closing %r cause no messages received in %f seconds',
+                    conn, self.period)
         self._close_task = self._get_loop().create_task(conn.close())
 
     def message_received(self):
-        print('MSG_RCVD', int(self._last_message))
         if self._close_task is None:
             self._last_message = self._get_loop().time()
-            print('LAST_MSG_SET', int(self._last_message), id(self))
 
 
 class RmqConnection(BaseConnection):
-    __slots__ = ('_connector', '_rmq_chan', '_ready', '_closing',
-                 '_recv_queue', '_send_queue', '_check_policy',
-                 '__weakref__')
+    __slots__ = ('_connector', '_chan', '_ready', '_closing',
+                 '_recv_queue', '_send_route', '_check_policy',
+                 '_connect_id', '__weakref__')
 
+    _chan: PooledChannel
     _ready: asyncio.Event
     _closing: 'asyncio.Future | None'
-    _rmq_chan: 'aiormq.abc.AbstractChannel'
     _connector: 'RmqConnector'
 
     @property
@@ -275,22 +257,15 @@ class RmqConnection(BaseConnection):
     @classmethod
     async def _do_handshake_and_create_connection(
             cls,
-            chan: 'aiormq.abc.AbstractChannel',
             connector: 'RmqConnector',
             handshaker: Handshaker,
             resp_waiter: MessageWaiter,
-            send_queue: str
+            send_route: ChannelRoute
     ) -> Self:
         inst = cls()
 
         async def send_message(data: bytes):
-            await _publish(
-                chan,
-                msg_type=_MessageType.HS_NEXT,
-                body=data,
-                exchange=connector.exchange,
-                routing_key=send_queue
-            )
+            await send_route.publish(_MessageType.HS_NEXT, body=data)
 
         async def recv_message():
             message = await resp_waiter.wait()
@@ -303,13 +278,7 @@ class RmqConnection(BaseConnection):
         try:
             await inst._run_handshaker(handshaker, send_message, recv_message)
         except HandshakeFail as fail:
-            await _publish(
-                chan,
-                msg_type=_MessageType.HS_FAIL,
-                body=fail.dumpb(),
-                exchange=connector.exchange,
-                routing_key=send_queue
-            )
+            await send_route.publish(_MessageType.HS_FAIL, fail.dumpb())
             raise
 
         inst._ready = asyncio.Event()
@@ -322,38 +291,50 @@ class RmqConnection(BaseConnection):
     def __repr__(self) -> str:
         cls_name = self.__class__.__name__
         if self._ready:
-            state = f'on channel {self._rmq_chan.number}'
+            state = f'on channel {self._chan.number}'
         else:
             state = 'not ready'
         return f'<{cls_name} {state}>'
 
     def _set_run_data(
             self,
-            chan: 'aiormq.abc.AbstractChannel',
+            chan: PooledChannel,
             policy: ConnectionCheckPolicy,
             recv_queue: str,
-            send_queue: str
+            send_queue: str,
+            connect_id: bytes
     ):
-        self._rmq_chan = chan
+        self._chan = chan
+        self._connect_id = connect_id
         self._check_policy = policy
-        self._recv_queue, self._send_queue = recv_queue, send_queue
+        self._recv_queue = recv_queue
+        self._send_route = ChannelRoute(
+            chan,
+            self._connector.exchange_name,
+            send_queue
+        )
 
     def update(self, connection: Self) -> None:
-        if self._connector._connect_id != connection._connector._connect_id:
-            raise ValueError('Got connection with different connect_id')
-        if connection._rmq_chan.is_closed:
-            raise ValueError('Got connection with closed channel')
+        if self._connector._client_id != connection._connector._client_id:
+            raise ValueError('Got connection with different client_id')
+        if connection._chan.expired:
+            raise ValueError('Got connection with expired channel')
 
         self._ready.set()
         self._closing = None
-        self._rmq_chan = connection._rmq_chan
-        self._check_policy = connection._check_policy.replace_conn(self)
+        self._set_run_data(
+            connection._chan,
+            connection._check_policy.replace_conn(self),
+            connection._recv_queue,
+            connection._send_route.routing_key,
+            connection._connect_id,
+        )
 
     async def send(self, metadata: Any, raw_data: bytes):
         body = json_dumpb(metadata) + NULL_CHAR + raw_data
         try:
             await self._send(_MessageType.MESSAGE, body)
-        except _closed_exceptions():
+        except ChannelExpired:
             self._ready.clear()
             await self._send(_MessageType.MESSAGE, body)  # retry once after channel opened
         except aiormq.exceptions.AMQPError:
@@ -363,12 +344,14 @@ class RmqConnection(BaseConnection):
 
     async def _send(self, msg_type: _MessageType, body: bytes):
         await self._ready.wait()
-        await _publish(
-            self._rmq_chan,
-            msg_type=msg_type,
-            body=body,
-            exchange=self._connector.exchange,
-            routing_key=self._send_queue
+        logger.debug('%r sent %r to %r',
+                     self, msg_type, self._send_route.routing_key)
+
+        # cancelling of aiormq RPC task will send Channel.Close to server,
+        # which greatly increases chances of connection exception,
+        # which in turn will break everything on same URL in same pool
+        await asyncio.shield(
+            self._send_route.publish(msg_type, body=body)
         )
 
     async def run_until_fail(
@@ -381,52 +364,57 @@ class RmqConnection(BaseConnection):
             return
         finally:
             self._ready.clear()
+            await self._chan.release()
 
     async def _run_until_fail(self, request_received_cb):
-        async def ack_message(message):
-            await self._rmq_chan.basic_ack(message.delivery_tag)
+        waiter = await MessageWaiter.new(
+            self._chan,
+            self._recv_queue,
+            no_ack=False
+        )
 
-        waiter = await MessageWaiter.new(self._rmq_chan,
-                                         self._recv_queue, no_ack=False)
+        self._chan.on_release(lambda _: waiter.interrupt())
 
-        self._rmq_chan.closing.add_done_callback(lambda _: waiter.interrupt())
-
-        # TODO: even when connection between Server and Client
-        # is not established, we can publish messages to queue
-        # as long as we have channel open
-        while not self._rmq_chan.is_closed:
+        while self._ready.is_set():
             message = await waiter.wait()
+            logger.debug(
+                '%r received %r from %r',
+                self, message.header.properties.message_type, self._recv_queue
+            )
 
             self._check_policy.message_received()
 
             if message.header.properties.message_type == _MessageType.MESSAGE:
                 null_pos = message.body.find(NULL_CHAR)
                 if null_pos == -1:
-                    await ack_message(message)
+                    await self._chan.ack_message(message)
                     await self._close(True)
                     raise ValueError('Got message without metadata separator')
 
                 metadata = json_loadb(message.body[:null_pos])
                 request_received_cb(metadata, message.body[null_pos+1:])
-                await ack_message(message)
+                await self._chan.ack_message(message)
 
             elif message.header.properties.message_type == _MessageType.LISTENING:
-                await ack_message(message)
+                await self._chan.ack_message(message)
                 continue
 
             elif message.header.properties.message_type == _MessageType.CLOSE:
-                await ack_message(message)
-                await self._close(False)
-                return
+                await self._chan.ack_message(message)
+
+                if message.body == self._connect_id:
+                    await self._close(False)
+                    return
 
             else:
-                await ack_message(message)
+                await self._chan.ack_message(message)
                 await self._close(True)
                 message_type = message.header.properties.message_type
                 raise ValueError('Unknown message in message queue, '
                                 f'got type {message_type!r}')
 
     async def close(self) -> None:
+        logger.debug('Closing %r', self)
         await self._close(True)
 
     async def _close(self, send_close_request: bool):
@@ -438,27 +426,25 @@ class RmqConnection(BaseConnection):
 
         self._ready.clear()
 
-        if self._rmq_chan.is_closed or self._rmq_chan.connection.is_closed:
+        if self._chan.expired:
             return
 
         self._closing = asyncio.get_running_loop().create_future()
         try:
             if send_close_request:
-                await _publish(
-                    self._rmq_chan,
-                    msg_type=_MessageType.CLOSE,
-                    body=b'',
-                    exchange=self._connector.exchange,
-                    routing_key=self._send_queue,
-                    properties_kwargs={
-                        'timestamp': datetime.now()
-                    }
+                await self._send_route.publish(
+                    _MessageType.CLOSE,
+                    body=self._connect_id
                 )
-            await self._rmq_chan.close()
-        except _closed_exceptions() + (asyncio.CancelledError,):
+            await self._chan.release()
+        except (
+            ChannelExpired,
+            asyncio.CancelledError,
+            aiormq.exceptions.ChannelClosed,
+            aiormq.exceptions.ConnectionClosed
+        ):
             return
         finally:
-            await self._connector._check_connection_use()
             self._closing.set_result(None)
 
 
@@ -470,7 +456,7 @@ class RmqServer(asyncio.AbstractServer):
     def __init__(
             self,
             connector: 'RmqConnector',
-            rmq_chan: 'aiormq.abc.AbstractChannel',
+            rmq_chan: PooledChannel,
             handshaker: Handshaker,
             client_connected_cb: ClientConnectedCB
     ) -> None:
@@ -481,14 +467,13 @@ class RmqServer(asyncio.AbstractServer):
         self._client_connected_cb = client_connected_cb
 
     def is_serving(self):
-        """Return True if the server is accepting connections."""
-        return not self._chan.is_closed
+        """Returns True if the server accepts connections."""
+        return not self._chan.expired
 
     def close(self):
         async def close_channel():
-            if not self._chan.is_closed:
-                await self._chan.close()
-            await self._connector._check_connection_use()
+            if not self._chan.expired:
+                await self._chan.release()
             if self._closing is not asyncio.current_task():
                 raise RuntimeError('Server closing task changed')
             self._closing = None
@@ -504,83 +489,96 @@ class RmqServer(asyncio.AbstractServer):
 
     async def _on_connect(self, message: 'aiormq.abc.DeliveredMessage'):
         if message.header.properties.message_type != _MessageType.CONNECT_REQUEST:
-            await self._connector._ack_message(self._chan, message)
+            await self._chan.ack_message(message)
             raise ValueError('Unknown message in connect request queue')
 
         if message.header.properties.reply_to is None:
-            await self._connector._ack_message(self._chan, message)
+            await self._chan.ack_message(message)
             raise ValueError('Reply queue not specified in connect request')
 
-        hs_to_cli_queue = message.header.properties.reply_to
-        connect_id = json_loadb(message.body)
-
-        hs_to_srv_queue = await self._connector._queue_declare_and_bind(
-            self._chan, exclusive=True
+        client_id = json_loadb(message.body)
+        hs_to_cli_route = ChannelRoute(
+            self._chan,
+            self.exchange,
+            message.header.properties.reply_to
         )
 
-        await _publish(
-            self._chan,
-            msg_type=_MessageType.CONNECT_RESPONSE,
+        hs_to_srv_queue = await self._chan.queue_declare_and_bind(
+            self.exchange,
+            exclusive=True
+        )
+
+        await hs_to_cli_route.publish(
+            _MessageType.CONNECT_RESPONSE,
             body=b'',
-            exchange=self.exchange,
-            routing_key=hs_to_cli_queue,
             properties_kwargs={
                 'reply_to': hs_to_srv_queue
             }
         )
 
-        await self._connector._ack_message(self._chan, message)
+        await self._chan.ack_message(message)
 
-        resp_waiter = await MessageWaiter.new(self._chan, hs_to_srv_queue,
-                                              no_ack=True, timeout=10)
-
+        run_chan = await self._connector.acquire_channel()
+        resp_waiter = await MessageWaiter.new(
+            run_chan,
+            hs_to_srv_queue,
+            no_ack=True,
+            timeout=10
+        )
         try:
             conn = await RmqConnection._do_handshake_and_create_connection(
-                self._chan,
                 self._connector,
                 self._handshaker,
                 resp_waiter,
-                hs_to_cli_queue
+                hs_to_cli_route
             )
         except HandshakeFail:
+            await run_chan.release()
             return
         finally:
-            if not self._chan.is_closed:
-                await self._chan.queue_delete(hs_to_srv_queue)
+            if not self._chan.expired:
+                await self._chan.inner.queue_delete(hs_to_srv_queue)
+        await run_chan.cancel_consume()
 
         to_cli_queue, to_srv_queue = \
-            self._connector._get_transport_queue_names(connect_id)
+            self._connector._get_transport_queue_names(client_id)
 
-        await self._connector._queue_declare_and_bind(
-            self._chan, name=to_cli_queue, durable=True
+        await run_chan.queue_declare_and_bind(
+            self.exchange,
+            name=to_cli_queue,
+            durable=True
         )
-        await self._connector._queue_declare_and_bind(
-            self._chan, name=to_srv_queue, durable=True
-        )
-
-        await _publish(
-            self._chan,
-            msg_type=_MessageType.HS_DONE,
-            body=b'',
-            exchange=self.exchange,
-            routing_key=hs_to_cli_queue
+        await run_chan.queue_declare_and_bind(
+            self.exchange,
+            name=to_srv_queue,
+            durable=True
         )
 
-        # open new to prevent server's chan to be closed by connection
-        run_chan = await self._connector._open_channel()
-        policy = \
-            ServerCheckPolicy(conn, self._connector.CONNECTION_CHECK_PERIOD)
-        conn._set_run_data(run_chan, policy, to_srv_queue, to_cli_queue)
+        connect_id = uuid4().bytes
+        await hs_to_cli_route.publish(_MessageType.HS_DONE, connect_id)
+        policy = ServerCheckPolicy(
+            conn,
+            self._connector.CONNECTION_CHECK_PERIOD
+        )
+        conn._set_run_data(
+            run_chan,
+            policy,
+            to_srv_queue,
+            to_cli_queue,
+            connect_id
+        )
 
         self._client_connected_cb(conn)
 
     async def start_serving(self):
         queue_name = self._connector._get_connect_queue_name()
 
-        await self._connector._queue_declare_and_bind(
-            self._chan, queue_name, durable=True
+        await self._chan.queue_declare_and_bind(
+            self.exchange,
+            queue_name,
+            durable=True
         )
-        await self._chan.basic_consume(queue_name, self._on_connect)
+        await self._chan.consume(queue_name, self._on_connect)
 
     def get_loop(self):
         raise NotImplementedError
@@ -596,9 +594,9 @@ class RmqConnector(BaseConnector):
 
     WARNING:
         For this connector to work properly, only one client
-        with same address and connect_id must be connected at same time.
+        with same address and client_id must be connected at same time.
 
-        For those, who connect, connect_id must be set explicitly
+        For those, who connect, client_id must be set explicitly
         and persist between service restarts.
 
         Failure to comply with these rules
@@ -612,22 +610,24 @@ class RmqConnector(BaseConnector):
     if client did not got any message in (this period * 1.5),
     it closes connection"""
 
-    __slots__ = ('_url', '_address', '_connect_id',
-                 '_exchange', '_exchange_declared')
+    __slots__ = ('_url', '_address', '_client_id',
+                 '_exchange', '_exchange_declared', '_pool')
 
-    @property
-    def exchange(self):
-        return self._exchange
+    url: read_accessor[str] = read_accessor('_url')
+    address: read_accessor[str] = read_accessor('_address')
+    client_id: read_accessor[str] = read_accessor('_client_id')
+    exchange_name: read_accessor[str] = read_accessor('_exchange')
 
     def __init__(
             self,
             url: str,
             address: str,
-            connect_id: 'str | None' = None,
-            exchange_name: str = _DEFAULT_EXCHANGE,
+            client_id: 'str | None' = None,
+            exchange_name: str = DEFAULT_EXCHANGE,
+            channel_pool: ChannelPool = DEFAULT_POOL
     ) -> None:
         """
-        Max summary length of address and connect_id is 224 characters
+        Max summary length of address and client_id is 224 characters
 
         Args:
             url (str): used to create connection with RabbitMQ server.
@@ -635,29 +635,30 @@ class RmqConnector(BaseConnector):
             address (str): unique identifier for client-server pair.
               If more than one server with same address bound to same exchange,
               behaviour undefined.
-            connect_id (str): unique identifier of connecting process.
+            client_id (str): unique identifier of connecting process.
               Must be set for clients.
         """
         if not _HAVE_AIORMQ:
             raise ImportError('RmqConnector requires aiormq library. '
                               'Install communica with [rabbitmq] extra.')
 
-        if connect_id is not None and len(address + connect_id) > 224:
-            raise ValueError('Max address + connect_id length is 224 characters')
+        if client_id is not None and len(address + client_id) > 224:
+            raise ValueError('Max address + client_id length is 224 characters')
 
         self._url = URL(url)
+        self._pool = channel_pool
         self._address = address
         self._exchange = exchange_name
-        self._connect_id = connect_id
+        self._client_id = client_id
         self._exchange_declared = False
 
     def _get_connect_queue_name(self):
         return self._fmt_queue_name('connect', 'server')
 
-    def _get_transport_queue_names(self, connect_id: str):
+    def _get_transport_queue_names(self, client_id: str):
         return (
-            self._fmt_queue_name('toClient', connect_id),
-            self._fmt_queue_name('toServer', connect_id)
+            self._fmt_queue_name('toClient', client_id),
+            self._fmt_queue_name('toServer', client_id)
         )
 
     def _fmt_queue_name(self, *parts):
@@ -673,11 +674,11 @@ class RmqConnector(BaseConnector):
             handshaker: Handshaker,
             client_connected_cb: ClientConnectedCB,
     ) -> asyncio.AbstractServer:
-        chan = await self._open_channel()
+        chan = await self._pool.acquire_chan(self._url)
 
-        await chan.basic_qos(prefetch_count=1)
+        await chan.inner.basic_qos(prefetch_count=1)
 
-        await chan.exchange_declare(
+        await chan.inner.exchange_declare(
             self._exchange,
             exchange_type="direct",
             durable=True,
@@ -690,31 +691,35 @@ class RmqConnector(BaseConnector):
     async def _client_connect(
             self,
             handshaker: Handshaker,
-            chan: 'aiormq.abc.AbstractChannel'
+            chan: PooledChannel
     ):
-        await chan.basic_qos(prefetch_count=1)
+        await chan.inner.basic_qos(prefetch_count=1)
 
-        hs_to_cli_queue = \
-            await self._queue_declare_and_bind(chan, exclusive=True)
+        hs_to_cli_queue = await chan.queue_declare_and_bind(
+            self.exchange_name,
+            exclusive=True
+        )
 
-        await _publish(
-            chan,
+        await chan.publish(
             msg_type=_MessageType.CONNECT_REQUEST,
-            body=json_dumpb(self._connect_id),
-            exchange=self.exchange,
+            body=json_dumpb(self._client_id),
+            exchange=self.exchange_name,
             routing_key=self._get_connect_queue_name(),
             properties_kwargs={
                 'reply_to': hs_to_cli_queue
             }
         )
 
-        resp_waiter = \
-            await MessageWaiter.new(chan, hs_to_cli_queue, no_ack=True)
+        resp_waiter = await MessageWaiter.new(
+            chan,
+            hs_to_cli_queue,
+            no_ack=True,
+            timeout=10  # TODO: user-specified timeout
+        )
 
         message = await resp_waiter.wait()
         if message.header.properties.message_type != _MessageType.CONNECT_RESPONSE:
             raise ValueError('Unknown message in connect response queue')
-
         if message.header.properties.reply_to is None:
             raise ValueError('Server queue not specified in connect response')
         hs_to_srv_queue = message.header.properties.reply_to
@@ -723,42 +728,52 @@ class RmqConnector(BaseConnector):
 
         try:
             conn = await RmqConnection._do_handshake_and_create_connection(
-                chan,
                 self,
                 handshaker,
                 resp_waiter,
-                hs_to_srv_queue
+                ChannelRoute(chan, self.exchange_name, hs_to_srv_queue)
             )
         except Exception:
-            if not chan.is_closed:
-                await chan.queue_delete(hs_to_cli_queue)
+            if not chan.expired:
+                await chan.inner.queue_delete(hs_to_cli_queue)
             raise
 
         message = await resp_waiter.wait()
-        await chan.queue_delete(hs_to_cli_queue)
+        await chan.inner.queue_delete(hs_to_cli_queue)
+        await chan.cancel_consume()
 
         if message.header.properties.message_type != _MessageType.HS_DONE:
             message_type = message.header.properties.message_type
             raise ValueError(f'Got message with "{message_type}" type '
                               'instead of handshake confirmation')
+        connect_id = message.body
 
         to_cli_queue, to_srv_queue = \
-            self._get_transport_queue_names(self._connect_id)  # type: ignore
-        policy = ClientCheckPolicy(conn, self.CONNECTION_CHECK_PERIOD * 1.5)
-        conn._set_run_data(chan, policy, to_cli_queue, to_srv_queue)
+            self._get_transport_queue_names(self._client_id)  # pyright: ignore[reportArgumentType]
+        policy = ClientCheckPolicy(
+            conn,
+            self.CONNECTION_CHECK_PERIOD * 1.5
+        )
+        conn._set_run_data(
+            chan,
+            policy,
+            to_cli_queue,
+            to_srv_queue,
+            connect_id
+        )
 
         return conn
 
     async def client_connect(self, handshaker: Handshaker) -> BaseConnection:
-        if self._connect_id is None:
+        if self._client_id is None:
             raise TypeError('Cannot connect to server. For those, who connect, '
-                            'connect_id parameter must be set. '
+                            'client_id parameter must be set. '
                             'Check RmqConnector docs for details.')
 
-        chan = await self._open_channel()
+        chan = await self.acquire_channel()
         try:
             if not self._exchange_declared:
-                await chan.exchange_declare(
+                await chan.inner.exchange_declare(
                     self._exchange,
                     exchange_type="direct",
                     durable=True,
@@ -767,96 +782,30 @@ class RmqConnector(BaseConnector):
 
             return await self._client_connect(handshaker, chan)
         except Exception:
-            if not chan.is_closed:
-                await chan.close()
+            if not chan.expired:
+                await chan.release()
             raise
 
     async def cleanup(self):
         """
         Drop all pending messages and
-        delete queues with connector's connect_id
+        delete queues with connector's client_id
 
-        If connect_id is None, noop
+        If client_id is None, noop
         """
-        if self._connect_id is None:
+        if self._client_id is None:
             return
 
-        for queue in self._get_transport_queue_names(self._connect_id):
-            chan = await self._open_channel()
+        for queue in self._get_transport_queue_names(self._client_id):
+            chan = await self.acquire_channel()
             try:
-                await chan.queue_purge(queue)
-                await chan.queue_delete(queue)
+                await chan.inner.queue_purge(queue)
+                await chan.inner.queue_delete(queue)
             except aiormq.exceptions.ChannelNotFoundEntity:
+                # XXX проверить
                 # channel will be closed by server when trying to delete unknown queue
-                await asyncio.wait([chan.closing])
-            await chan.close()
+                await asyncio.wait([chan.inner.closing])
+            await chan.release()
 
-        await self._check_connection_use()
-
-    def dump_state(self) -> str:
-        """Unsupported for this connector"""
-        raise TypeError('This method unsupported cause user and password '
-                        'are not encrypted in dump, which is insecure')
-
-    @classmethod
-    def from_state(cls, state: str) -> Self:
-        """Unsupported for this connector"""
-        raise TypeError('This method unsupported cause user and password '
-                        'are not encrypted in dump, which is insecure')
-
-    async def _ack_message(self, chan, message):
-        await chan.basic_ack(message.delivery_tag)
-
-    async def _open_channel(self):
-        # there are two limits for simultaneously opened channels:
-        # 65k defined by AMQP protocol (channel number range),
-        # which cause 'while not (some channel closed)' loop in conn.channel()
-        # and 'max-channels' limit set by AMQP server
-        # (RabbitMQ 3.11 default is 2048), which cause connection termination
-        # it's unlikely to happen, but i'll keep this in mind ( in comment :D )
-
-        if (conn := _connections.get(self._url)) is None:
-            fut = asyncio.get_running_loop().create_future()
-            _connections[self._url] = fut
-            try:
-                conn = await aiormq.connect(self._url)
-            except Exception as e:
-                fut.set_exception(e)
-                del(_connections[self._url])
-                raise
-            else:
-                fut.set_result(conn)
-                _connections[self._url] = conn
-
-        elif isinstance(conn, asyncio.Future):
-            conn = await conn
-
-        elif conn.is_closed:
-            del(_connections[self._url])
-            return await self._open_channel()
-
-        return await conn.channel()
-
-    async def _check_connection_use(self):
-        conn = _connections.get(self._url)
-        if conn is None or isinstance(conn, asyncio.Future):
-            return
-
-        for chan in conn.channels.values():
-            if chan is not None and not chan.is_closed:
-                return
-        del(_connections[self._url])
-        await conn.close()
-
-    async def _queue_declare_and_bind(
-            self,
-            chan: 'aiormq.abc.AbstractChannel',
-            name: str = '',
-            **declare_kwargs
-    ):
-        declare_ok = await chan.queue_declare(queue=name, **declare_kwargs)
-        assert declare_ok.queue is not None, 'Incompatible AMQP server'
-        queue_name = declare_ok.queue
-
-        await chan.queue_bind(queue_name, self.exchange, routing_key=queue_name)
-        return queue_name
+    def acquire_channel(self):
+        return self._pool.acquire_chan(self._url)

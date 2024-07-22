@@ -1,14 +1,17 @@
+import os
 import logging
-import asyncio
 
 import pytest
 
 from communica.utils import logger
-from communica.connectors import *
+from communica.connectors import RmqConnector, TcpConnector, LocalConnector
 from communica.serializers import JsonSerializer
 
 
 logger.setLevel(logging.DEBUG)
+
+
+RMQ_URL = os.getenv('RABBITMQ_URL', 'amqp://guest:guest@localhost:5672/')
 
 
 @pytest.fixture
@@ -25,9 +28,9 @@ def serializer():
         'name': 'test',
     }),
     (RmqConnector, lambda: {
-        'url': 'amqp://guest:guest@localhost:5672/',
+        'url': RMQ_URL,
         'address': 'test',
-        'connect_id': 'test_client'
+        'client_id': 'test_client'
     }),
 ])
 def connector(request: pytest.FixtureRequest):
