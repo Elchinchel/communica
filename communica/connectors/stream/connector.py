@@ -1,24 +1,35 @@
 import json
 import asyncio
-
-from ssl import SSLContext
+import logging
 from abc import ABC, abstractmethod
+from ssl import SSLContext
 from struct import Struct
-from typing import Sequence, Optional, Any
+from typing import Any, Dict, Type, ClassVar, Optional
+from contextlib import suppress
+from dataclasses import dataclass
 
 from typing_extensions import Self
 
 from communica.utils import (
-    INT32MAX, NULL_CHAR, ETX_CHAR,
-    MessageQueue, logger, json_dumpb, json_loadb
+    ETX_CHAR,
+    NULL_CHAR,
+    UINT32MAX,
+    MessageQueue,
+    json_dumpb,
+    json_loadb,
+    read_accessor,
 )
-
-from communica.connectors import _stream_local
+from communica.exceptions import FeatureNotAvailable
 from communica.connectors.base import (
-    BaseConnection, BaseConnector,
-    RequestReceivedCB, ClientConnectedCB,
-    Handshaker, HandshakeOk, HandshakeFail
+    Handshaker,
+    HandshakeOk,
+    BaseConnector,
+    HandshakeFail,
+    BaseConnection,
+    ClientConnectedCB,
+    RequestReceivedCB,
 )
+from communica.connectors.stream import local_connections
 
 
 __all__ = (
@@ -26,18 +37,26 @@ __all__ = (
     'LocalConnector'
 )
 
+logger = logging.getLogger('communica.connectors.stream')
 DEFAULT_STREAM_HWM = 32
 
 
 class Frame(ABC):
-    __slots__ = ()
+    CODE: ClassVar[int]
+    code_byte: ClassVar[bytes]
+    LENGTH_PACKER = Struct(
+        '!I'  # big-endian uint32
+    )
 
-    CODE: bytes
+    length_size = LENGTH_PACKER.size
+    length_pack = LENGTH_PACKER.pack
+    length_unpack_from = LENGTH_PACKER.unpack_from
 
-    _frames = {}
+    _frames: ClassVar[Dict[int, Type[Self]]] = {}
 
     def __init_subclass__(cls) -> None:
         cls._frames[cls.CODE] = cls
+        cls.code_byte = bytes([cls.CODE])
 
     @abstractmethod
     def to_bytes(self) -> bytes:
@@ -45,11 +64,11 @@ class Frame(ABC):
 
     @classmethod
     @abstractmethod
-    def _load(cls, data: Sequence[bytes]):
+    def _load(cls, data: memoryview):
         raise NotImplementedError
 
     @classmethod
-    def from_bytes(cls, data: Sequence[bytes]) -> 'Frame':
+    def from_bytes(cls, data: memoryview) -> Self:
         try:
             frame = cls._frames[data[0]]
         except ValueError:
@@ -58,21 +77,44 @@ class Frame(ABC):
         return frame._load(data[1:])
 
 
+@dataclass
 class MessageFrame(Frame):
-    CODE = b'\x01'
+    CODE = 10
 
-    _header_packer = Struct(
-        '!I'  # message length
-         'H'  # data start index
-    )
-    _pack_header = _header_packer.pack
-    _header_size = _header_packer.size
+    metadata: Any
+    raw_data: bytes
 
-    def __init__(self) -> None:
-        super().__init__()
+    @classmethod
+    def _load(cls, data: memoryview):
+        metadata_end = cls.length_unpack_from(data)[0]
+        return cls(
+            json_loadb(data[cls.length_size:metadata_end]),
+            data[metadata_end:]
+        )
 
     def to_bytes(self) -> bytes:
-        return self.CODE + b''
+        return (
+            self.code_byte +
+            self.length_pack(len(self.metadata) + self.length_size) +
+            self.metadata +
+            self.raw_data
+        )
+
+
+@dataclass
+class CloseNotifyFrame(Frame):
+    CODE = 20
+
+    @classmethod
+    def to_bytes_with_header(cls) -> bytes:
+        return cls.length_pack(len(cls.code_byte)) + cls.code_byte
+
+    @classmethod
+    def _load(cls, data: memoryview):
+        return cls()
+
+    def to_bytes(self) -> bytes:
+        return self.code_byte
 
 
 class StreamConnection(BaseConnection):
@@ -82,19 +124,13 @@ class StreamConnection(BaseConnection):
     writer: asyncio.StreamWriter
     connector: 'BaseStreamConnector'
 
-    _send_queue: 'MessageQueue[tuple[bytes, bytes]]'
+    _send_queue: 'MessageQueue[Frame]'
     _handshake_result: 'HandshakeOk | None'
 
-    _header_packer = Struct(
-        '!I'  # message length
-         'H'  # data start index
-    )
-    _MAX_CHUNK_SIZE = INT32MAX + 1 - _header_packer.size
+    _MAX_CHUNK_SIZE = UINT32MAX + 1 - Frame.length_size
 
-    @property
-    def max_chunk_size(self):
-        """Максимально допустимый для одного сообщения размер, в байтах"""
-        return self._MAX_CHUNK_SIZE
+    max_chunk_size: read_accessor[int] = read_accessor('_MAX_CHUNK_SIZE')
+    """Max size of one message in bytes"""
 
     def __init__(
             self,
@@ -125,66 +161,82 @@ class StreamConnection(BaseConnection):
         return None
 
     async def send(self, metadata: Any, raw_data: bytes):
+        # XXX: split big messages instead of error?
         if len(raw_data) > self._MAX_CHUNK_SIZE:
             raise ValueError('Data exceeds max chunk size (%d bytes)' %
                              self._MAX_CHUNK_SIZE)
 
-        await self._send_queue.put((json_dumpb(metadata), raw_data))
+        await self._send_queue.put(
+            MessageFrame(json_dumpb(metadata), raw_data)
+        )
 
     async def close(self):
+        close_chunk = CloseNotifyFrame.to_bytes_with_header()
+        self.writer.write(close_chunk)
         self.writer.close()
+        with suppress(AssertionError):
+            self.reader.feed_data(close_chunk)
+
         await self.writer.wait_closed()
 
     async def _run_connection(self, request_received_cb: RequestReceivedCB):
         is_closing = self.writer.is_closing
         readexactly = self.reader.readexactly
-        header_size = self._header_packer.size
-        header_unpack = self._header_packer.unpack
+        header_size = Frame.length_size
+        header_unpack = Frame.length_unpack_from
 
         write_task = asyncio.create_task(self._send_runner())
         try:
             while not is_closing():
                 header = await readexactly(header_size)
-                chunk_len, data_start = header_unpack(header)
+                chunk_len = header_unpack(header)[0]
                 chunk = memoryview(await readexactly(chunk_len))
 
-                request_received_cb(json_loadb(chunk[:data_start]), chunk[data_start:])
+                frame = Frame.from_bytes(chunk)
+                logger.debug('Received %r', frame)
+                if isinstance(frame, MessageFrame):
+                    request_received_cb(frame.metadata, frame.raw_data)
+                elif isinstance(frame, CloseNotifyFrame):
+                    self.writer.close()
+                    return
+                else:
+                    logger.warning('wtf')
         except Exception as e:
-            logger.debug('Connection broken: %r', e)
+            logger.info('Connection broken: %r', e)
             raise
         finally:
             write_task.cancel()
             await asyncio.wait([write_task])
 
-        return None
-
     async def _send_runner(self):
-        header_pack = self._header_packer.pack
+        write = self.writer.write
+        drain = self.writer.drain
+        header_pack = Frame.length_pack
+        send_queue_get = self._send_queue.get
 
         while True:
-            metadata, data = await self._send_queue.get()
+            frame = await send_queue_get()
+            data = frame.to_bytes()
 
-            meta_len = len(metadata)
-            self.writer.write(
-                header_pack(meta_len + len(data), meta_len) +
-                metadata +
+            write(
+                header_pack(len(data)) +
                 data
             )
+            logger.debug('Sent %r', frame)
 
             # yield to loop, giving chance to pause protocol
             await asyncio.sleep(0)
 
-            await self.writer.drain()
+            await drain()
 
     async def _do_handshake(
             self,
             handshaker: Handshaker,
     ):
         async def send_message(data):
-            if NULL_CHAR in data:
+            if NULL_CHAR in data or ETX_CHAR in data:
                 raise ValueError('Handshake messages must NOT contain '
-                                 'NULL and ETX characters')
-
+                                f'{NULL_CHAR!r} and {ETX_CHAR!r} characters')
             self.writer.write(data + NULL_CHAR)
             await self.writer.drain()
 
@@ -194,8 +246,7 @@ class StreamConnection(BaseConnection):
             except asyncio.IncompleteReadError as e:
                 if (pos := e.partial.find(ETX_CHAR)) == -1:
                     raise
-                err_obj = json_loadb(e.partial[pos+1:])
-                raise HandshakeFail(err_obj['reason'])
+                raise HandshakeFail.loadb(e.partial[pos+1:])
 
         try:
             await self._run_handshaker(handshaker, send_message, recv_message)
@@ -312,23 +363,30 @@ class LocalConnector(BaseStreamConnector):
               There is limit for name length, depending on running OS.
               Case insensitive (will be lowered).
         """
+        if not local_connections.IS_AVAILABLE:
+            raise FeatureNotAvailable(
+                'Current platform does not provide named pipes or unix '
+                'sockets. If there is some similar way of communication '
+                'for local processes, please file an issue to communica\'s'
+                'GitHub repository ("Bug Tracker" on PyPI page).'
+            )
         self._name = name.lower()
 
     def repr_address(self) -> str:
-        return _stream_local.format_address(self._name)
+        return local_connections.format_address(self._name)
 
     async def server_start(
             self,
             handshaker: Handshaker,
             client_connected_cb: ClientConnectedCB,
     ):
-        return await _stream_local.start_server(
+        return await local_connections.start_server(
             self._create_server_cb(handshaker, client_connected_cb),
             self._name
         )
 
     async def _open_connection(self):
-        return await _stream_local.open_connection(self._name)
+        return await local_connections.open_connection(self._name)
 
     def dump_state(self) -> str:
         return json.dumps({'type': self._TYPE, 'name': self._name})

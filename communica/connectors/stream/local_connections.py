@@ -1,12 +1,14 @@
-# pyright: reportGeneralTypeIssues=false
+# pyright: reportAttributeAccessIssue=none
 
+import sys
 import asyncio
 
 
-if not hasattr(asyncio, 'open_unix_connection'):
-    class PipeServerWrapper(asyncio.AbstractServer):
-        """Abstract server returned by create_server()."""
+IS_AVAILABLE = True
 
+
+if sys.platform == 'win32':
+    class PipeServerWrapper(asyncio.AbstractServer):
         def __init__(self, server: asyncio.windows_events.PipeServer) -> None:
             self.server = server
 
@@ -62,7 +64,7 @@ if not hasattr(asyncio, 'open_unix_connection'):
     def format_address(address: str) -> str:
         return '\\\\.\\pipe\\' + 'communica.' + address
 
-else:
+elif hasattr(asyncio, 'open_unix_connection'):
     import os
     import os.path
     import tempfile
@@ -85,3 +87,6 @@ else:
 
     def format_address(address: str) -> str:
         return os.path.join(SOCK_DIR, address + '.sock')
+
+else:
+    IS_AVAILABLE = False
