@@ -1,21 +1,20 @@
 import asyncio
-
 from uuid import uuid4
-from typing import TypedDict, Any, cast
+from typing import Any, TypedDict
 
 from communica.utils import TaskSet, logger
-from communica.exceptions import ReqError, RespError, SerializerError
+from communica.exceptions import ReqError
 from communica.serializers import BaseSerializer, default_serializer
+from communica.entities.base import SyncHandlerType, AsyncHandlerType
 from communica.connectors.base import (
-    BaseConnection, BaseConnector,
-    HandshakeOk, HandshakeFail, HandshakeGen
+    BaseConnector,
 )
-
-from communica.pairs.base import SyncHandlerType, AsyncHandlerType
-from communica.pairs.simple import (
-    ReqRepClient, ReqRepServer,
-    RequestType, RequestHandler,
-    ReqRepMessageFlow, ServerHandshakeOk
+from communica.entities.simple import (
+    RequestType,
+    ReqRepClient,
+    ReqRepServer,
+    RequestHandler,
+    ReqRepMessageFlow,
 )
 
 
@@ -135,7 +134,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
         )
 
 
-class RouteClient(ReqRepClient):
+class RouteClient(ReqRepClient[RouteMessageFlow]):
     """
     Pair for RouteServer.
 
@@ -143,8 +142,6 @@ class RouteClient(ReqRepClient):
     """
 
     __slots__ = ()
-
-    _flow: RouteMessageFlow
 
     def __init__(
             self,
@@ -168,7 +165,8 @@ class RouteClient(ReqRepClient):
 
         Args:
             route: Handler identifier.
-            serializer: Defaults to JsonSerializer.
+            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
+                Defaults to JsonSerializer.
         """
         def decorator(endpoint: 'SyncHandlerType | AsyncHandlerType'):
             self._flow.update_route(route, endpoint, serializer)
@@ -185,8 +183,10 @@ class RouteClient(ReqRepClient):
         Send request, wait response.
 
         Args:
-            route: Handler identifier
-            client_id: If omitted or None, random client will be chosen
+            route: Handler identifier.
+            client_id: If omitted or None, random client will be chosen.
+            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
+                Defaults to JsonSerializer.
         """
         return await self._flow.request(route, serializer, data)
 
@@ -200,13 +200,15 @@ class RouteClient(ReqRepClient):
         Send request without waiting response.
 
         Args:
-            route: Handler identifier
-            client_id: If omitted or None, random client will be chosen
+            route: Handler identifier.
+            client_id: If omitted or None, random client will be chosen.
+            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
+                Defaults to JsonSerializer.
         """
         return await self._flow.throw(route, serializer, data)
 
 
-class RouteServer(ReqRepServer):
+class RouteServer(ReqRepServer[RouteMessageFlow]):
     """
     Pair for RouteClient.
 
@@ -224,6 +226,7 @@ class RouteServer(ReqRepServer):
         self.connector = connector
         self._routes = []
         self._known_clients = {}
+        self._client_connected = asyncio.Event()
         self._client_conn_runners = {}
 
     def route_handler(
@@ -236,7 +239,8 @@ class RouteServer(ReqRepServer):
 
         Args:
             route: Handler identifier.
-            serializer: Defaults to JsonSerializer.
+            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
+                Defaults to JsonSerializer.
         """
         def decorator(endpoint: 'SyncHandlerType | AsyncHandlerType'):
             for flow in self._known_clients.values():
@@ -252,25 +256,11 @@ class RouteServer(ReqRepServer):
         for handler, _ in flow.routes.values():
             handler.running_tasks.cancel()
 
-    def _on_client_connect(self, connection: BaseConnection):
-        loop = self._get_loop()
-        handshake_result = cast(ServerHandshakeOk, connection.get_handshake_result())
-        client_id = handshake_result.client_id
-
-        flow = self._known_clients.get(client_id)
-        if not isinstance(flow, RouteMessageFlow):
-            new_flow = RouteMessageFlow()
-            for route, handler, serializer in self._routes:
-                new_flow.update_route(route, handler, serializer)
-            if isinstance(flow, asyncio.Future):
-                flow.set_result(new_flow)
-            self._known_clients[client_id] = new_flow
-            flow = new_flow
-        flow.update_connection(connection)
-
-        task = loop.create_task(connection.run_until_fail(flow.dispatch))
-        task.add_done_callback(self._on_conn_fail)
-        self._client_conn_runners[client_id] = task
+    def _create_new_flow(self) -> RouteMessageFlow:
+        flow = RouteMessageFlow()
+        for route, handler, serializer in self._routes:
+            flow.update_route(route, handler, serializer)
+        return flow
 
     async def request(
             self,
@@ -285,7 +275,9 @@ class RouteServer(ReqRepServer):
         Args:
             route: Handler identifier.
             client_id: If omitted or None, random connected client will be chosen.
-            serializer: Defaults to JsonSerializer.
+            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
+                Defaults to JsonSerializer. Once serializer was used for
+                request, no other serializer can be used for same route.
         """
         flow = await self._get_client_flow(client_id)
         return await flow.request(route, serializer, data)
@@ -303,7 +295,9 @@ class RouteServer(ReqRepServer):
         Args:
             route: Handler identifier.
             client_id: If omitted or None, random connected client will be chosen.
-            serializer: Defaults to JsonSerializer.
+            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
+                Defaults to JsonSerializer. Once serializer was used for
+                request, no other serializer can be used for same route.
         """
         flow = await self._get_client_flow(client_id)
         return await flow.throw(route, serializer, data)

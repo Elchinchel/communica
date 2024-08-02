@@ -1,29 +1,28 @@
 import random
 import asyncio
-
+import logging
 from abc import abstractmethod
 from enum import Enum
-from uuid import uuid4, uuid1
-from typing import TypedDict, Any, cast
+from uuid import uuid1, uuid4
+from typing import Any, Generic, TypeVar, TypedDict, cast
 from inspect import iscoroutinefunction
 from traceback import format_exc
 from dataclasses import dataclass
 
+from communica.utils import TaskSet, HasLoopMixin, BackoffDelayer, iscallable
+from communica.exceptions import ReqError, RespError, UnknownError, SerializerError
 from communica.serializers import BaseSerializer, default_serializer
-from communica.exceptions import (
-    ReqError, RespError, UnknownError, SerializerError
+from communica.entities.base import (
+    BaseClient,
+    BaseServer,
+    SyncHandlerType,
+    AsyncHandlerType,
 )
 from communica.connectors.base import (
-    BaseConnection, BaseConnector,
-    HandshakeOk, HandshakeGen
-)
-from communica.utils import (
-    BackoffDelayer, HasLoopMixin, TaskSet, iscallable, logger
-)
-
-from communica.pairs.base import (
-    BaseClient, BaseServer,
-    SyncHandlerType, AsyncHandlerType
+    HandshakeOk,
+    HandshakeGen,
+    BaseConnector,
+    BaseConnection,
 )
 
 
@@ -31,6 +30,12 @@ __all__ = (
     'SimpleClient',
     'SimpleServer'
 )
+
+
+FlowT = TypeVar('FlowT', bound='ReqRepMessageFlow')
+
+
+logger = logging.getLogger('communica.entities.simple')
 
 
 class RequestType(int, Enum):
@@ -98,9 +103,9 @@ class ReqRepMessageFlow(HasLoopMixin):
         self._response_waiters = {}
 
     def update_connection(self, connection: BaseConnection):
-        try:
+        if hasattr(self, '_connection'):
             self._connection.update(connection)
-        except AttributeError:
+        else:
             self._connection = connection
         return self._connection
 
@@ -121,7 +126,7 @@ class ReqRepMessageFlow(HasLoopMixin):
     ):
         fut = self._response_waiters.pop(metadata['id'], None)
         if fut is None or fut.done():
-            logger.warning('Drop response for unknown or expired request')
+            logger.warning('Dropped response for unknown or expired request')
             return
 
         req_type = metadata['type']
@@ -183,7 +188,7 @@ class ReqRepMessageFlow(HasLoopMixin):
             resp_meta['type'] = RequestType.RESP_ERR_RESPONDER
 
         except Exception as e:
-            logger.error('Unexpected exception in %r', handler, exc_info=True)
+            logger.exception('Unexpected exception in %r', handler)
             resp_data = UnknownError(repr(e)).to_dict()
             resp_meta['type'] = RequestType.RESP_ERR_UNKNOWN
 
@@ -215,6 +220,9 @@ class ReqRepMessageFlow(HasLoopMixin):
         elif resp_meta['type'] > RequestType.RESP_ERR_UNKNOWN:
             logger.warning('Error occured while handling request, but '
                            'requester don\'t know about this:\n' + resp_data['msg'])
+
+    @abstractmethod
+    def dispatch(self, metadata: Any, raw_data: bytes): ...
 
 
 class SimpleMessageFlow(ReqRepMessageFlow):
@@ -262,9 +270,10 @@ class SimpleMessageFlow(ReqRepMessageFlow):
         )
 
 
-class ReqRepClient(BaseClient):
+class ReqRepClient(BaseClient, Generic[FlowT]):
     __slots__ = ('_connected_event', '_run_task', '_client_id', '_flow')
 
+    _flow: FlowT
     _run_task: 'asyncio.Task | None'
 
     @property
@@ -287,7 +296,6 @@ class ReqRepClient(BaseClient):
         if not self._run_task or self._run_task.done():
             self._run_task = \
                 self._get_loop().create_task(self._connection_keeper())
-            # self._run_task.add_done_callback(self._on_conn_fail)
 
         try:
             await asyncio.wait_for(self.connected_event.wait(), timeout)
@@ -307,7 +315,6 @@ class ReqRepClient(BaseClient):
             try:
                 new_conn = await self.connector.client_connect(self._handshaker)
             except Exception as e:
-                # TODO: log successful reconnect
                 logger.warning('%r: Connect failed: %r', self.connector, e)
                 await delayer.wait()
                 continue
@@ -316,12 +323,15 @@ class ReqRepClient(BaseClient):
             self.connected_event.set()
             delayer.reset()
 
+            logger.info('Connected to %s', self.connector.repr_address())
             try:
                 await connection.run_until_fail(self._flow.dispatch)
             except Exception as e:
-                logger.error('Unhandled exception '
-                             'in connection runner: %r', e)
+                logger.exception('Unhandled exception '
+                                 'in connection runner: %r', e)
             self.connected_event.clear()
+            logger.info('Disconnected from server on %s',
+                        self.connector.repr_address())
             await asyncio.sleep(1)
 
     async def _handshaker(self, connection: BaseConnection) -> HandshakeGen:
@@ -329,7 +339,7 @@ class ReqRepClient(BaseClient):
             'client_id': self._client_id
         }
 
-        server_hello = (yield client_hello)
+        server_hello = (yield client_hello)  # noqa
 
         yield HandshakeOk()
 
@@ -366,7 +376,7 @@ class SimpleClient(ReqRepClient):
         self._run_task = None
 
     def _not_defined_handler(self, data: Any):
-        raise RespError('Client side not defined handler for server requests')
+        raise RespError('Client side did not define handler for server requests')
 
     async def request(self, data: Any) -> Any:
         """Send request, wait response."""
@@ -377,12 +387,17 @@ class SimpleClient(ReqRepClient):
         return await self._flow.throw(data)
 
 
-class ReqRepServer(BaseServer):
-    __slots__ = ('_server', '_known_clients', '_client_conn_runners')
+class ReqRepServer(BaseServer, Generic[FlowT]):
+    __slots__ = ('_server', '_known_clients', '_client_conn_runners',
+                 '_client_connected')
 
     _server: asyncio.AbstractServer
-    _known_clients: 'dict[str, ReqRepMessageFlow | asyncio.Future[ReqRepMessageFlow]]'
     _client_conn_runners: 'dict[str, asyncio.Task]'
+
+    # future waiter waits specific client
+    _known_clients: 'dict[str, FlowT | asyncio.Future[FlowT]]'
+    # event waiter waits any client
+    _client_connected: asyncio.Event
 
     async def init(self):
         if not hasattr(self, '_server') or not self._server.is_serving():
@@ -415,18 +430,45 @@ class ReqRepServer(BaseServer):
         yield ServerHandshakeOk(client_id=client_id)
 
     # TODO: clear _known_clients
-    async def _get_client_flow(self, client_id: 'str | None') -> Any:
+    async def _get_client_flow(
+            self,
+            client_id: 'str | None'
+    ) -> FlowT:
         if client_id is None:
-            while not (connected := self._get_connected_clients()):
-                await asyncio.sleep(1)
-            return random.choice(connected)
+            connected_clients = self._get_connected_clients()
+            if not connected_clients:
+                await self._client_connected.wait()
+            return random.choice(connected_clients)
 
         flow = self._known_clients.get(client_id)
         if not isinstance(flow, ReqRepMessageFlow):
             if flow is None:
                 self._known_clients[client_id] = self._get_loop().create_future()
-            flow = await self._known_clients[client_id]  # type: ignore
+            flow = await asyncio.shield(self._known_clients[client_id])  # pyright: ignore
         return flow
+
+    def _on_client_connect(self, connection: BaseConnection):
+        loop = self._get_loop()
+        handshake_result = cast(ServerHandshakeOk, connection.get_handshake_result())
+        client_id = handshake_result.client_id
+
+        flow = self._known_clients.get(client_id)
+        if not isinstance(flow, ReqRepMessageFlow):
+            new_flow = self._create_new_flow()
+            if isinstance(flow, asyncio.Future):
+                flow.set_result(new_flow)
+            self._known_clients[client_id] = new_flow
+            flow = new_flow
+
+        connection = flow.update_connection(connection)
+        self._client_connected.set()
+        self._client_connected.clear()
+
+        task = loop.create_task(connection.run_until_fail(flow.dispatch))
+        task.add_done_callback(self._on_conn_fail)
+        self._client_conn_runners[client_id] = task
+        logger.info('Client with id %r connected to server on %s',
+                    client_id, self.connector.repr_address())
 
     def _get_connected_clients(self):
         return [
@@ -441,15 +483,15 @@ class ReqRepServer(BaseServer):
             logger.warning(f'Client read failed: {exc!r}')
 
     @abstractmethod
-    def _cancel_handler_tasks(self, flow):
+    def _cancel_handler_tasks(self, flow: FlowT):
         raise NotImplementedError
 
     @abstractmethod
-    def _on_client_connect(self, connection: BaseConnection):
+    def _create_new_flow(self) -> FlowT:
         raise NotImplementedError
 
 
-class SimpleServer(ReqRepServer):
+class SimpleServer(ReqRepServer[SimpleMessageFlow]):
     """
     Pair to SimpleClient.
 
@@ -474,28 +516,14 @@ class SimpleServer(ReqRepServer):
         self.connector = connector
         self._serializer = serializer
         self._known_clients = {}
+        self._client_connected = asyncio.Event()
         self._client_conn_runners = {}
 
     def _cancel_handler_tasks(self, flow: SimpleMessageFlow):
         flow.handler.running_tasks.cancel()
 
-    def _on_client_connect(self, connection: BaseConnection):
-        loop = self._get_loop()
-        handshake_result = cast(ServerHandshakeOk, connection.get_handshake_result())
-        client_id = handshake_result.client_id
-
-        flow = self._known_clients.get(client_id)
-        if not isinstance(flow, SimpleMessageFlow):
-            new_flow = SimpleMessageFlow(self._handler, self._serializer)
-            if isinstance(flow, asyncio.Future):
-                flow.set_result(new_flow)
-            self._known_clients[client_id] = new_flow
-            flow = new_flow
-        flow.update_connection(connection)
-
-        task = loop.create_task(connection.run_until_fail(flow.dispatch))
-        task.add_done_callback(self._on_conn_fail)
-        self._client_conn_runners[client_id] = task
+    def _create_new_flow(self) -> SimpleMessageFlow:
+        return SimpleMessageFlow(self._handler, self._serializer)
 
     async def request(self, data: Any, client_id: 'str | None' = None) -> Any:
         """
