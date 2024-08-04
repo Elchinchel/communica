@@ -1,13 +1,14 @@
+import string
 import asyncio
 import logging
-
-from traceback import format_exception
+from random import Random
 
 import pytest
 
 
 tasks = set()
 logger = logging.getLogger()
+letters_and_digits = string.ascii_letters + string.digits
 
 
 def create_task(coro):
@@ -15,6 +16,11 @@ def create_task(coro):
     tasks.add(task)
     task.add_done_callback(tasks.discard)
     return task
+
+
+def create_string(length: int, seed: int = 0):
+    chars = Random(seed).choices(letters_and_digits, k=length)
+    return ''.join(chars)
 
 
 def dummy_handler(data):

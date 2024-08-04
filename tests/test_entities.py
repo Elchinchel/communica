@@ -3,23 +3,19 @@
 import asyncio
 
 import pytest
-
-from communica.pairs.base import BaseEntity
-from communica.serializers import AdaptixSerializer
-from communica.pairs import (
-    SimpleClient, SimpleServer, RouteClient, RouteServer
-)
-from communica.exceptions import (
-    ReqError, RespError, UnknownError, SerializerError
-)
-
-from utils_misc import wait_tasks, dummy_handler, wait_second
-from utils_simple_entities_for_tests import(
+from utils_misc import wait_tasks, wait_second, dummy_handler
+from utils_simple_entities_for_tests import (
     MessageExistenceChecker,
-    client_to_server_messages, server_to_client_messages,
+    client_to_server_messages,
+    server_to_client_messages,
     run_concurrent_send_with_simples,
-    run_sequential_send_with_simples
+    run_sequential_send_with_simples,
 )
+
+from communica.entities import RouteClient, RouteServer, SimpleClient, SimpleServer
+from communica.exceptions import ReqError, RespError, UnknownError, SerializerError
+from communica.serializers import AdaptixSerializer
+from communica.entities.base import BaseEntity
 
 
 class TestBaseEntities:

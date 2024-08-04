@@ -1,7 +1,7 @@
 import asyncio
 
 import pytest
-from utils_misc import create_task
+from utils_misc import create_task, create_string
 from utils_simple_entities_for_tests import (
     run_concurrent_send_with_simples,
     run_sequential_send_with_simples,
@@ -19,15 +19,15 @@ class FastDyingRmqConnector(RmqConnector):
 
 class TestRmqConnector:
     @pytest.mark.asyncio
-    async def test_listen_checks(self):
+    async def test_listen_checks(self, rmq_connector):
         connector = FastDyingRmqConnector(
-            url='amqp://guest:guest@localhost:5672/',
-            address='test',
-            client_id='test_client'
+            url=rmq_connector.url,
+            address=rmq_connector.address,
+            client_id=rmq_connector.client_id
         )
 
         server = SimpleServer(connector, lambda data: None)
-        create_task(server.run())
+        await server.init()
 
         async with SimpleClient(connector) as client:
             await asyncio.sleep(2)
@@ -36,14 +36,14 @@ class TestRmqConnector:
             # so connection should be alive
             assert client._flow._connection.is_alive
 
-            server.stop()
+            await server.close()
             await asyncio.sleep(2)
 
             # no messages and no notifications, connection should be closed
             assert not client._flow._connection.is_alive
 
             await asyncio.sleep(2)
-            create_task(server.run())
+            await server.init()
             # reconnect to restarted server
             while not client._flow._connection.is_alive:
                 await asyncio.sleep(0.5)
@@ -58,23 +58,36 @@ class TestRmqConnector:
 
             assert client._flow._connection.is_alive
 
-        await server.wait_stop()
+        await server.close()
 
     @pytest.mark.asyncio
-    async def test_connector(self):
-        connector = RmqConnector(
-            url='amqp://guest:guest@localhost:5672/',
-            address='test',
-            client_id='test_client'
-        )
-
-        await connector.cleanup()
+    async def test_rmq_connector(self, rmq_connector):
+        await rmq_connector.cleanup()
 
         await run_sequential_send_with_simples(
-            connector, default_serializer
+            rmq_connector, default_serializer
         )
         await run_concurrent_send_with_simples(
-            connector, default_serializer
+            rmq_connector, default_serializer
         )
 
-        await connector.cleanup()
+        await rmq_connector.cleanup()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_after_connection_close(
+            self,
+            rmq_connector: RmqConnector
+    ):
+        messages = []
+
+        server = SimpleServer(rmq_connector, lambda data: messages.append(data))
+        client = SimpleClient(rmq_connector)
+
+        async with server, client:
+            await client.request(1)
+            await client.request(2)
+            assert messages == [1, 2]
+
+            chan = await rmq_connector.acquire_channel()
+            await chan.inner.connection.close()
+            await client.request(3)

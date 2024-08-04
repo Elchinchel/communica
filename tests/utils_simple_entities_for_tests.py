@@ -4,7 +4,7 @@ from typing import Iterable
 import pytest
 from utils_misc import wait_tasks
 
-from communica.pairs import SimpleClient, SimpleServer
+from communica.entities import SimpleClient, SimpleServer
 
 
 class MessageOrderChecker:
