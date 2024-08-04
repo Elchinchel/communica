@@ -9,7 +9,13 @@ from inspect import iscoroutinefunction
 from traceback import format_exc
 from dataclasses import dataclass
 
-from communica.utils import TaskSet, HasLoopMixin, BackoffDelayer, iscallable
+from communica.utils import (
+    TaskSet,
+    HasLoopMixin,
+    BackoffDelayer,
+    iscallable,
+    fmt_task_name,
+)
 from communica.exceptions import ReqError, RespError, UnknownError, SerializerError
 from communica.serializers import BaseSerializer, default_serializer
 from communica.entities.base import (
@@ -240,7 +246,8 @@ class SimpleMessageFlow(ReqRepMessageFlow):
     def dispatch(self, metadata: Metadata, raw_data: bytes):
         if metadata['type'] < RequestType.RESP_OK:
             self.handler.running_tasks.create_task_with_exc_log(
-                self.handle_request(metadata, raw_data)
+                self.handle_request(metadata, raw_data),
+                name=fmt_task_name('simple-request-handler')
             )
         else:
             self._handle_response(self.serializer, metadata, raw_data)
@@ -294,8 +301,10 @@ class ReqRepClient(BaseClient, Generic[FlowT]):
 
     async def init(self, timeout: 'int | None' = None):
         if not self._run_task or self._run_task.done():
-            self._run_task = \
-                self._get_loop().create_task(self._connection_keeper())
+            self._run_task = self._get_loop().create_task(
+                self._connection_keeper(),
+                name=fmt_task_name('client-connection-keeper')
+            )
 
         try:
             await asyncio.wait_for(self.connected_event.wait(), timeout)
@@ -464,7 +473,10 @@ class ReqRepServer(BaseServer, Generic[FlowT]):
         self._client_connected.set()
         self._client_connected.clear()
 
-        task = loop.create_task(connection.run_until_fail(flow.dispatch))
+        task = loop.create_task(
+            connection.run_until_fail(flow.dispatch),
+            name=fmt_task_name('connection-runner')
+        )
         task.add_done_callback(self._on_conn_fail)
         self._client_conn_runners[client_id] = task
         logger.info('Client with id %r connected to server on %s',

@@ -1,26 +1,24 @@
+import logging
+import itertools
 import threading
-
-from os import getenv
 from random import gauss
-from typing import Any, TypeVar, Generic
-from logging import getLogger
-from inspect import isclass, isfunction, ismethod
-from asyncio import get_running_loop, current_task, sleep, CancelledError, Task
+from typing import Any, Generic, TypeVar
+from asyncio import Task, sleep, current_task, get_running_loop
+from inspect import isclass, ismethod, isfunction
+from operator import attrgetter
 from traceback import format_exception
-from collections import deque
+from collections import deque, defaultdict
 
 
 _TV = TypeVar('_TV')
 
-logger = getLogger('communica')
-
-if getenv('COMMUNICA_DEBUG'):
-    logger.setLevel(10)
+logger = logging.getLogger('communica')
+_task_counters = defaultdict(lambda: itertools.count())
 
 ETX_CHAR = b'\x04'
 NULL_CHAR = b'\x00'
 
-INT32MAX = 2**32 - 1
+UINT32MAX = 2**32 - 1
 UINT16MAX = 2**16 - 1
 INT32RANGE = (-2**31, 2**31 - 1)
 
@@ -61,7 +59,12 @@ class HasLoopMixin:
                 if self._bound_loop is None:
                     self._bound_loop = loop
         if loop is not self._bound_loop:
-            raise RuntimeError(f'{self!r} is bound to a different event loop')
+            raise RuntimeError(
+                f'{self!r} is bound to a different event loop. '
+                'Consider using one event loop per process, '
+                'or at least do not use one asyncio object '
+                'in different loops and/or threads.'
+            )
         return loop
 
 
@@ -71,14 +74,14 @@ class TaskSet(HasLoopMixin):
     def __init__(self) -> None:
         self.tasks = set()
 
-    def create_task(self, coro) -> Task:
-        task = self._get_loop().create_task(coro)
+    def create_task(self, coro, *, name=None) -> Task:
+        task = self._get_loop().create_task(coro, name=name)
         task.add_done_callback(self.tasks.discard)
         self.tasks.add(task)
         return task
 
-    def create_task_with_exc_log(self, coro):
-        task = self.create_task(coro)
+    def create_task_with_exc_log(self, coro, *, name=None):
+        task = self.create_task(coro, name=name)
         task.add_done_callback(exc_log_callback)
         return task
 
@@ -208,3 +211,7 @@ def cycle_range(start: int, stop: int):
             i = 0
         else:
             i += 1
+
+
+def fmt_task_name(name: str) -> str:
+    return f'communica-{name}-{next(_task_counters[name])}'

@@ -17,6 +17,7 @@ from communica.utils import (
     MessageQueue,
     json_dumpb,
     json_loadb,
+    fmt_task_name,
     read_accessor,
 )
 from communica.exceptions import FeatureNotAvailable
@@ -185,7 +186,10 @@ class StreamConnection(BaseConnection):
         header_size = Frame.length_size
         header_unpack = Frame.length_unpack_from
 
-        write_task = asyncio.create_task(self._send_runner())
+        write_task = asyncio.create_task(
+            self._send_runner(),
+            name=fmt_task_name('stream-connector-writer')
+        )
         try:
             while not is_closing():
                 header = await readexactly(header_size)

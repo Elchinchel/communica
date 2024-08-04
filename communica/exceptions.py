@@ -2,6 +2,15 @@ class CommunicaError(Exception):
     """Base exception for all library errors."""
 
 
+class FeatureNotAvailable(CommunicaError):
+    """
+    Some feature is not available in current environment.
+
+    Meant for lack of platform specific functionality
+    or not installed libraries.
+    """
+
+
 class SerializerError(CommunicaError):
     """Error on loading or dumping data"""
 
@@ -51,7 +60,7 @@ class _RequestsErr(CommunicaError):
 class ReqError(_RequestsErr):
     """
     Errors, caused by requesting side
-    (don't forget, Server can make request to Client too)
+    (Server can make request to Client too)
 
     Can be raised by user code in request handler, in this case
     requesting side get same exception with specified

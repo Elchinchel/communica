@@ -5,9 +5,10 @@ try:
 except ModuleNotFoundError:
     _HAVE_ADAPTIX = False
 
-from typing import Any, Generic, Type, TypeVar
+from typing import Any, Type, Generic, TypeVar
 
 from communica.utils import json_dumpb, json_loadb
+from communica.exceptions import FeatureNotAvailable
 from communica.serializers import BaseSerializer
 
 
@@ -31,8 +32,10 @@ class AdaptixSerializer(BaseSerializer, Generic[TReq, TResp]):
             retort: 'adaptix.Retort | None' = None
     ) -> None:
         if not _HAVE_ADAPTIX:
-            raise ImportError('AdaptixSerializer requires adaptix library. '
-                              'Install communica with [adaptix] extra.')
+            raise FeatureNotAvailable(
+                'AdaptixSerializer requires adaptix library. '
+                'Install communica with [adaptix] extra.'
+            )
 
         self._retort = retort or adaptix.Retort()
         self._req_model = request_model

@@ -2,7 +2,7 @@ import asyncio
 from uuid import uuid4
 from typing import Any, TypedDict
 
-from communica.utils import TaskSet, logger
+from communica.utils import TaskSet, logger, fmt_task_name
 from communica.exceptions import ReqError
 from communica.serializers import BaseSerializer, default_serializer
 from communica.entities.base import SyncHandlerType, AsyncHandlerType
@@ -64,7 +64,8 @@ class RouteMessageFlow(ReqRepMessageFlow):
                 task_set = self.fallback_task_set
 
             task_set.create_task_with_exc_log(
-                self.handle_request(route_handle, metadata, raw_data)
+                self.handle_request(route_handle, metadata, raw_data),
+                name=fmt_task_name('route-request-handler')
             )
         else:
             try:

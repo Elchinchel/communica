@@ -14,9 +14,11 @@ from communica.utils import (
     HasLoopMixin,
     json_dumpb,
     json_loadb,
+    fmt_task_name,
     read_accessor,
     exc_log_callback,
 )
+from communica.exceptions import FeatureNotAvailable
 from communica.connectors.base import (
     Handshaker,
     BaseConnector,
@@ -154,11 +156,14 @@ class ServerCheckPolicy(ConnectionCheckPolicy):
         self.period = period
         self._waiter = self._get_loop().create_future()
 
-        self._set_handle()
-
-        self._send_task = self._get_loop().create_task(self._sender())
+        self._send_task = self._get_loop().create_task(
+            self._sender(),
+            name=fmt_task_name('rmq-server-listen-notifier')
+        )
         self._send_task.add_done_callback(exc_log_callback)
         self._conn = weakref.ref(conn, self._conn_died)
+
+        self._set_handle()
 
     def replace_conn(self, conn: 'RmqConnection'):
         conn._check_policy._cancel()
@@ -233,7 +238,10 @@ class ClientCheckPolicy(ConnectionCheckPolicy):
 
         logger.info('Closing %r cause no messages received in %f seconds',
                     conn, self.period)
-        self._close_task = self._get_loop().create_task(conn.close())
+        self._close_task = self._get_loop().create_task(
+            conn.close(),
+            name=fmt_task_name('rmq-client-check-closer')
+        )
 
     def message_received(self):
         if self._close_task is None:
@@ -268,7 +276,12 @@ class RmqConnection(BaseConnection):
             await send_route.publish(_MessageType.HS_NEXT, body=data)
 
         async def recv_message():
-            message = await resp_waiter.wait()
+            try:
+                message = await resp_waiter.wait()
+            except asyncio.TimeoutError:
+                raise HandshakeFail('Response timeout exceeded '
+                                    'when connection is established') from None
+
             if message.header.properties.message_type == _MessageType.HS_FAIL:
                 raise HandshakeFail.loadb(message.body)
             elif message.header.properties.message_type != _MessageType.HS_NEXT:
@@ -468,9 +481,15 @@ class RmqServer(asyncio.AbstractServer):
 
     def is_serving(self):
         """Returns True if the server accepts connections."""
-        return not self._chan.expired
+        try:
+            return not self._chan.expired
+        except AttributeError:
+            return False
 
     def close(self):
+        if not hasattr(self, '_chan'):
+            return
+
         async def close_channel():
             if not self._chan.expired:
                 await self._chan.release()
@@ -479,7 +498,10 @@ class RmqServer(asyncio.AbstractServer):
             self._closing = None
 
         if not self._closing or self._closing.done():
-            self._closing = asyncio.create_task(close_channel())
+            self._closing = asyncio.create_task(
+                close_channel(),
+                name=fmt_task_name('rmq-server-closer')
+            )
 
     async def wait_closed(self):
         if not self._closing or self._closing.done():
@@ -490,11 +512,14 @@ class RmqServer(asyncio.AbstractServer):
     async def _on_connect(self, message: 'aiormq.abc.DeliveredMessage'):
         if message.header.properties.message_type != _MessageType.CONNECT_REQUEST:
             await self._chan.ack_message(message)
-            raise ValueError('Unknown message in connect request queue')
+            logger.error('Unknown message type in connect request queue (%r in %r)',
+                         message.header.properties.message_type, self._queue_name)
+            return
 
         if message.header.properties.reply_to is None:
             await self._chan.ack_message(message)
-            raise ValueError('Reply queue not specified in connect request')
+            logger.error('Reply queue is not specified in the connect request')
+            return
 
         client_id = json_loadb(message.body)
         hs_to_cli_route = ChannelRoute(
@@ -502,6 +527,8 @@ class RmqServer(asyncio.AbstractServer):
             self.exchange,
             message.header.properties.reply_to
         )
+
+        logger.debug('got connect request from client_id=%s', client_id)
 
         hs_to_srv_queue = await self._chan.queue_declare_and_bind(
             self.exchange,
@@ -568,17 +595,52 @@ class RmqServer(asyncio.AbstractServer):
             connect_id
         )
 
+        logger.info('Handshake with client_id=%s succedeed, connect_id=%s',
+                     client_id, connect_id)
         self._client_connected_cb(conn)
 
-    async def start_serving(self):
-        queue_name = self._connector._get_connect_queue_name()
+    async def _restart_serving(self):
+        logger.warning(
+            'aiormq channel under %r was unexpectedly closed! '
+            'Trying to restart server on a new channel',
+            self
+        )
+        await self._chan.release()
+        await self.start_serving()
 
+    def _make_aiormq_channel_close_cb(self):
+        last_alive_channel = self._chan
+
+        def callback(_):
+            if self._chan is not last_alive_channel:
+                return  # server was restarted after pool closed
+            if self._chan.explicitly_released:
+                return  # server was closed explicitly
+            asyncio.create_task(
+                self._restart_serving(),
+                name=fmt_task_name('rmq-server-restart')
+            )
+
+        return callback
+
+    async def start_serving(self):
+        if self.is_serving():
+            return
+
+        self._chan = await self._connector.acquire_channel()
+        self._queue_name = self._connector._get_connect_queue_name()
+
+        await self._chan.inner.basic_qos(prefetch_count=1)
         await self._chan.queue_declare_and_bind(
             self.exchange,
-            queue_name,
+            self._queue_name,
             durable=True
         )
-        await self._chan.consume(queue_name, self._on_connect)
+        await self._chan.consume(self._queue_name, self._on_connect)
+
+        self._chan.inner.closing.add_done_callback(
+            self._make_aiormq_channel_close_cb()
+        )
 
     def get_loop(self):
         raise NotImplementedError
@@ -639,8 +701,10 @@ class RmqConnector(BaseConnector):
               Must be set for clients.
         """
         if not _HAVE_AIORMQ:
-            raise ImportError('RmqConnector requires aiormq library. '
-                              'Install communica with [rabbitmq] extra.')
+            raise FeatureNotAvailable(
+                'RmqConnector requires aiormq and yarl libraries. '
+                'Install communica with [rabbitmq] extra.'
+            )
 
         if client_id is not None and len(address + client_id) > 224:
             raise ValueError('Max address + client_id length is 224 characters')
@@ -676,15 +740,14 @@ class RmqConnector(BaseConnector):
     ) -> asyncio.AbstractServer:
         chan = await self._pool.acquire_chan(self._url)
 
-        await chan.inner.basic_qos(prefetch_count=1)
-
         await chan.inner.exchange_declare(
             self._exchange,
             exchange_type="direct",
             durable=True,
         )
+        await chan.release()
 
-        server = RmqServer(self, chan, handshaker, client_connected_cb)
+        server = RmqServer(self, handshaker, client_connected_cb)
         await server.start_serving()
         return server
 
