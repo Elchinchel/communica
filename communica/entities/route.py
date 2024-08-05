@@ -189,6 +189,8 @@ class RouteClient(ReqRepClient[RouteMessageFlow]):
             serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
                 Defaults to JsonSerializer.
         """
+        if not self._connected_event.is_set():
+            await self._connected_event.wait()
         return await self._flow.request(route, serializer, data)
 
     async def throw(
@@ -206,6 +208,8 @@ class RouteClient(ReqRepClient[RouteMessageFlow]):
             serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
                 Defaults to JsonSerializer.
         """
+        if not self._connected_event.is_set():
+            await self._connected_event.wait()
         return await self._flow.throw(route, serializer, data)
 
 

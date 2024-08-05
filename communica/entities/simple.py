@@ -389,10 +389,14 @@ class SimpleClient(ReqRepClient):
 
     async def request(self, data: Any) -> Any:
         """Send request, wait response."""
+        if not self._connected_event.is_set():
+            await self._connected_event.wait()
         return await self._flow.request(data)
 
     async def throw(self, data: Any) -> None:
         """Send request without waiting response."""
+        if not self._connected_event.is_set():
+            await self._connected_event.wait()
         return await self._flow.throw(data)
 
 
