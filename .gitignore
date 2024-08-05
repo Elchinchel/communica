@@ -32,8 +32,12 @@ pyvenv.cfg
 
 # local folders
 /local
+/docs/local
 
 # Other
 /test.py
 upload.bat
 coverage.lcov
+
+communica/connectors/nats.py
+docs/

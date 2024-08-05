@@ -18,6 +18,7 @@ dependencies = ["typing-extensions"]
 
 [project.optional-dependencies]
 test = [ "pytest", "pytest-cov", "pytest-asyncio" ]
+docs = [ "sphinx", "myst-parser", "python-docs-theme", "sphinx-autodoc2" ]
 
 orjson = ["orjson"]
 adaptix = ["adaptix"]
@@ -40,3 +41,14 @@ typeCheckingMode = "basic"
 reportIncompatibleMethodOverride = "warning"
 reportUnnecessaryTypeIgnoreComments = "warning"
 exclude = ["./build/"]
+
+[tool.ruff]
+line-length = 85
+
+[tool.ruff.lint.isort]
+length-sort = true
+lines-after-imports = 2
+known-third-party = []
+
+[tool.ruff.format]
+quote-style = "single"
