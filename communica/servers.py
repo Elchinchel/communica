@@ -1,7 +1,4 @@
-from communica.pairs import (
-    RouteServer,
-    SimpleServer
-)
+from communica.entities import RouteServer, SimpleServer
 
 
 __all__ = (

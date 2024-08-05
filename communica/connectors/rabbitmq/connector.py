@@ -44,8 +44,9 @@ else:
     from yarl import URL
 
 
-DEFAULT_EXCHANGE = 'communica'
 DEFAULT_POOL = ChannelPool()
+DEFAULT_EXCHANGE = 'communica'
+HANDSHAKE_TIMEOUT = 30
 
 logger = logging.getLogger('communica.connectors.rabbitmq')
 
@@ -101,7 +102,7 @@ class MessageWaiter(HasLoopMixin):
             fut.set_exception(asyncio.TimeoutError)
 
     def interrupt(self):
-        if self._waiter:
+        if self._waiter and not self._waiter.done():
             self._waiter.set_exception(asyncio.TimeoutError)
 
     async def wait(self) -> 'aiormq.abc.DeliveredMessage':
@@ -135,7 +136,7 @@ class ConnectionCheckPolicy(HasLoopMixin, ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def _cancel(self):
+    def cancel(self):
         raise NotImplementedError
 
     @abstractmethod
@@ -151,8 +152,6 @@ class ConnectionCheckPolicy(HasLoopMixin, ABC):
 
 class ServerCheckPolicy(ConnectionCheckPolicy):
     def __init__(self, conn: 'RmqConnection', period: float) -> None:
-        self._get_loop()
-
         self.period = period
         self._waiter = self._get_loop().create_future()
 
@@ -166,14 +165,15 @@ class ServerCheckPolicy(ConnectionCheckPolicy):
         self._set_handle()
 
     def replace_conn(self, conn: 'RmqConnection'):
-        conn._check_policy._cancel()
+        conn._check_policy.cancel()
         self._conn = weakref.ref(conn, self._conn_died)
         return self
 
-    def _cancel(self):
+    def cancel(self):
         if self._handle is not None:
             self._handle.cancel()
         self._conn_died(None)
+        self._send_task.cancel()
 
     def _conn_died(self, _):
         if not self._waiter.done():
@@ -181,6 +181,8 @@ class ServerCheckPolicy(ConnectionCheckPolicy):
 
     def _trigger(self):
         if self._waiter.done():
+            return
+        if self._send_task.done():
             return
 
         time_diff = self._get_loop().time() - self._last_message
@@ -210,8 +212,6 @@ class ServerCheckPolicy(ConnectionCheckPolicy):
 
 class ClientCheckPolicy(ConnectionCheckPolicy):
     def __init__(self, conn: 'RmqConnection', period: float) -> None:
-        self._get_loop()
-
         self.period = period
         self._set_handle()
 
@@ -219,11 +219,11 @@ class ClientCheckPolicy(ConnectionCheckPolicy):
         self._close_task = None
 
     def replace_conn(self, conn: 'RmqConnection'):
-        conn._check_policy._cancel()
+        conn._check_policy.cancel()
         self._conn = weakref.ref(conn)
         return self
 
-    def _cancel(self):
+    def cancel(self):
         if self._handle is not None:
             self._handle.cancel()
 
@@ -349,6 +349,7 @@ class RmqConnection(BaseConnection):
             await self._send(_MessageType.MESSAGE, body)
         except ChannelExpired:
             self._ready.clear()
+            await self._chan.release()
             await self._send(_MessageType.MESSAGE, body)  # retry once after channel opened
         except aiormq.exceptions.AMQPError:
             self._ready.clear()
@@ -387,6 +388,7 @@ class RmqConnection(BaseConnection):
         )
 
         self._chan.on_release(lambda _: waiter.interrupt())
+        self._chan.inner.closing.add_done_callback(lambda _: waiter.interrupt())
 
         while self._ready.is_set():
             message = await waiter.wait()
@@ -438,6 +440,7 @@ class RmqConnection(BaseConnection):
             return
 
         self._ready.clear()
+        self._check_policy.cancel()
 
         if self._chan.expired:
             return
@@ -469,11 +472,9 @@ class RmqServer(asyncio.AbstractServer):
     def __init__(
             self,
             connector: 'RmqConnector',
-            rmq_chan: PooledChannel,
             handshaker: Handshaker,
             client_connected_cb: ClientConnectedCB
     ) -> None:
-        self._chan = rmq_chan
         self._closing = None
         self._connector = connector
         self._handshaker = handshaker
@@ -550,8 +551,9 @@ class RmqServer(asyncio.AbstractServer):
             run_chan,
             hs_to_srv_queue,
             no_ack=True,
-            timeout=10
+            timeout=HANDSHAKE_TIMEOUT
         )
+        hs_completed = False
         try:
             conn = await RmqConnection._do_handshake_and_create_connection(
                 self._connector,
@@ -559,10 +561,17 @@ class RmqServer(asyncio.AbstractServer):
                 resp_waiter,
                 hs_to_cli_route
             )
+            hs_completed = True
         except HandshakeFail:
+            # if fail happens on server's side, client will get and log it
+            # so log on server only when debugging
+            logger.debug('Handshake with client_id=%s failed',
+                         client_id, exc_info=True)
             await run_chan.release()
             return
         finally:
+            if not hs_completed:
+                await run_chan.release()
             if not self._chan.expired:
                 await self._chan.inner.queue_delete(hs_to_srv_queue)
         await run_chan.cancel_consume()
@@ -685,8 +694,8 @@ class RmqConnector(BaseConnector):
             url: str,
             address: str,
             client_id: 'str | None' = None,
-            exchange_name: str = DEFAULT_EXCHANGE,
-            channel_pool: ChannelPool = DEFAULT_POOL
+            exchange_name: 'str | None' = None,
+            channel_pool: 'ChannelPool | None' = None
     ) -> None:
         """
         Max summary length of address and client_id is 224 characters
@@ -710,11 +719,12 @@ class RmqConnector(BaseConnector):
             raise ValueError('Max address + client_id length is 224 characters')
 
         self._url = URL(url)
-        self._pool = channel_pool
-        self._address = address
-        self._exchange = exchange_name
         self._client_id = client_id
+        self._address = address
         self._exchange_declared = False
+
+        self._pool = channel_pool or DEFAULT_POOL
+        self._exchange = exchange_name or DEFAULT_EXCHANGE
 
     def _get_connect_queue_name(self):
         return self._fmt_queue_name('connect', 'server')
@@ -776,8 +786,9 @@ class RmqConnector(BaseConnector):
         resp_waiter = await MessageWaiter.new(
             chan,
             hs_to_cli_queue,
-            no_ack=True,
-            timeout=10  # TODO: user-specified timeout
+            no_ack=True
+            # there is no timeout needed for first response,
+            # server will reply as soon as it ready
         )
 
         message = await resp_waiter.wait()
@@ -787,7 +798,7 @@ class RmqConnector(BaseConnector):
             raise ValueError('Server queue not specified in connect response')
         hs_to_srv_queue = message.header.properties.reply_to
 
-        resp_waiter.set_timeout_duration(10)
+        resp_waiter.set_timeout_duration(HANDSHAKE_TIMEOUT)
 
         try:
             conn = await RmqConnection._do_handshake_and_create_connection(
@@ -854,21 +865,41 @@ class RmqConnector(BaseConnector):
         Drop all pending messages and
         delete queues with connector's client_id
 
-        If client_id is None, noop
+        If client_id is None, server connect queue is deleted.
         """
         if self._client_id is None:
-            return
+            queue_names = [self._get_connect_queue_name()]
+        else:
+            queue_names = self._get_transport_queue_names(self._client_id)
 
-        for queue in self._get_transport_queue_names(self._client_id):
+        for queue in queue_names:
             chan = await self.acquire_channel()
             try:
                 await chan.inner.queue_purge(queue)
                 await chan.inner.queue_delete(queue)
             except aiormq.exceptions.ChannelNotFoundEntity:
-                # XXX проверить
-                # channel will be closed by server when trying to delete unknown queue
-                await asyncio.wait([chan.inner.closing])
+                # channel will be closed by server if queue is not found
+                if not chan.expired:
+                    await asyncio.wait([chan.inner.closing])
             await chan.release()
 
     def acquire_channel(self):
         return self._pool.acquire_chan(self._url)
+
+    @classmethod
+    def _load_pickled(cls, kwargs: dict):
+        return cls(**kwargs)
+
+    def __reduce__(self):
+        return (
+            RmqConnector._load_pickled,
+            (
+                {
+                    'url': self._url,
+                    'address': self._address,
+                    'client_id': self._client_id,
+                    'exchange_name': self._exchange,
+                    'channel_pool': None,
+                },
+            )
+        )

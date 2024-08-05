@@ -493,6 +493,7 @@ class ReqRepServer(BaseServer, Generic[FlowT]):
             return
         if (exc := task.exception()):
             logger.warning(f'Client read failed: {exc!r}')
+            logger.info('Exception details:', exc_info=exc)
 
     @abstractmethod
     def _cancel_handler_tasks(self, flow: FlowT):

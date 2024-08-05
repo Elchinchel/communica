@@ -49,6 +49,17 @@ except ImportError:
 
 _HasLoopMixin_lock = threading.Lock()
 
+
+class read_accessor(Generic[_TV]):
+    __slots__ = ('_getter',)
+
+    def __init__(self, path: str) -> None:
+        self._getter = attrgetter(path)
+
+    def __get__(self, instance, owner=None) -> _TV:
+        return self._getter(instance)
+
+
 # can be replaced with asyncio.mixins._LoopBoundMixin,
 # but it's not in public API
 class HasLoopMixin:
@@ -121,30 +132,23 @@ class MessageQueue(HasLoopMixin, Generic[_TV]):
         if len(self._queue) >= self._max_items:
             waiter = self._get_loop().create_future()
             self._put_waiters.append(waiter)
-            try:
-                await waiter
-            except CancelledError:
-                waiter.cancel()
-                raise
+            await waiter
 
-        if self._get_waiter is not None:
-            self._get_waiter.set_result(True)
+        if self._get_waiter:
+            if not self._get_waiter.done():
+                self._get_waiter.set_result(True)
             self._get_waiter = None
 
         self._queue.append(item)
 
     async def get(self) -> _TV:
         if not self._queue:
-            if self._get_waiter is not None:
+            if self._get_waiter and not self._get_waiter.done():
                 raise RuntimeError('Duplicate get from queue')
 
             waiter = self._get_loop().create_future()
-            try:
-                self._get_waiter = waiter
-                await self._get_waiter
-            finally:
-                if self._get_waiter is waiter:
-                    self._get_waiter = None
+            self._get_waiter = waiter
+            await self._get_waiter
 
         while self._put_waiters:
             if not (waiter := self._put_waiters.popleft()).done():
