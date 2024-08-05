@@ -319,7 +319,7 @@ class ReqRepClient(BaseClient, Generic[FlowT]):
             self._run_task.cancel()
 
     async def _connection_keeper(self):
-        delayer = BackoffDelayer(0.1, 5, 2, 0.5)
+        delayer = BackoffDelayer(1, 30, 2, 0.5)
         while True:
             try:
                 new_conn = await self.connector.client_connect(self._handshaker)

@@ -4,7 +4,7 @@ import weakref
 from abc import ABC, abstractmethod
 from enum import Enum
 from uuid import uuid4
-from typing import Any
+from typing import Any, Literal
 from collections import deque
 
 from typing_extensions import Self
@@ -12,6 +12,7 @@ from typing_extensions import Self
 from communica.utils import (
     NULL_CHAR,
     HasLoopMixin,
+    BackoffDelayer,
     json_dumpb,
     json_loadb,
     fmt_task_name,
@@ -465,6 +466,9 @@ class RmqConnection(BaseConnection):
 
 
 class RmqServer(asyncio.AbstractServer):
+    _closing: 'asyncio.Future | Literal[True] | None'
+    _restart_task: 'asyncio.Task | None'
+
     @property
     def exchange(self):
         return self._connector._exchange
@@ -476,6 +480,9 @@ class RmqServer(asyncio.AbstractServer):
             client_connected_cb: ClientConnectedCB
     ) -> None:
         self._closing = None
+        self._restart_task = None
+        self._start_lock = asyncio.Lock()
+
         self._connector = connector
         self._handshaker = handshaker
         self._client_connected_cb = client_connected_cb
@@ -488,7 +495,13 @@ class RmqServer(asyncio.AbstractServer):
             return False
 
     def close(self):
+        if self._restart_task:
+            self._restart_task.cancel()
+            self._restart_task = None
+
         if not hasattr(self, '_chan'):
+            self._closing = True
+        if self._closing is True:
             return
 
         async def close_channel():
@@ -505,6 +518,10 @@ class RmqServer(asyncio.AbstractServer):
             )
 
     async def wait_closed(self):
+        if self._closing is True:
+            self._closing = None
+            return
+
         if not self._closing or self._closing.done():
             raise RuntimeError('wait_closed() should be '
                                'called right after close() method')
@@ -611,11 +628,22 @@ class RmqServer(asyncio.AbstractServer):
     async def _restart_serving(self):
         logger.warning(
             'aiormq channel under %r was unexpectedly closed! '
-            'Trying to restart server on a new channel',
+            'Will repeatedly try to restart server on a new '
+            'channel after 10 seconds',
             self
         )
         await self._chan.release()
-        await self.start_serving()
+
+        delayer = BackoffDelayer(10, 90, 2, 0.5)
+        while True:
+            await delayer.wait()
+            try:
+                await self.start_serving()
+                break
+            except Exception:
+                logger.exception('%r restart failed', self)
+
+        logger.info('%r restarted successfully', self)
 
     def _make_aiormq_channel_close_cb(self):
         last_alive_channel = self._chan
@@ -625,7 +653,9 @@ class RmqServer(asyncio.AbstractServer):
                 return  # server was restarted after pool closed
             if self._chan.explicitly_released:
                 return  # server was closed explicitly
-            asyncio.create_task(
+            if self._restart_task and not self._restart_task.done():
+                return  # this should never happen but just in case
+            self._restart_task = asyncio.create_task(
                 self._restart_serving(),
                 name=fmt_task_name('rmq-server-restart')
             )
@@ -636,16 +666,17 @@ class RmqServer(asyncio.AbstractServer):
         if self.is_serving():
             return
 
-        self._chan = await self._connector.acquire_channel()
-        self._queue_name = self._connector._get_connect_queue_name()
+        async with self._start_lock:
+            self._chan = await self._connector.acquire_channel()
+            self._queue_name = self._connector._get_connect_queue_name()
 
-        await self._chan.inner.basic_qos(prefetch_count=1)
-        await self._chan.queue_declare_and_bind(
-            self.exchange,
-            self._queue_name,
-            durable=True
-        )
-        await self._chan.consume(self._queue_name, self._on_connect)
+            await self._chan.inner.basic_qos(prefetch_count=1)
+            await self._chan.queue_declare_and_bind(
+                self.exchange,
+                self._queue_name,
+                durable=True
+            )
+            await self._chan.consume(self._queue_name, self._on_connect)
 
         self._chan.inner.closing.add_done_callback(
             self._make_aiormq_channel_close_cb()
