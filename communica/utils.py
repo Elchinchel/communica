@@ -41,7 +41,10 @@ except ImportError:
     def json_dumpb(obj: Any) -> bytes:
         return json.dumps(obj, ensure_ascii=False).encode('utf-8')
 
-    json_loadb = json.loads
+    def json_loadb(__obj: bytes):
+        if isinstance(__obj, memoryview):
+            __obj = bytes(__obj)
+        return json.loads(__obj)
 
 
 _HasLoopMixin_lock = threading.Lock()
@@ -175,21 +178,18 @@ class BackoffDelayer:
 
     async def wait(self):
         await sleep(self._delay)
-        self._delay = gauss(
+        new_delay = gauss(
             min(self.max_delay, (self._delay * self.factor)),
             self.jitter
         )
+        if new_delay > self._delay:
+            self._delay = new_delay
 
 
 def exc_log_callback(task: Task):
     if not task.cancelled() and (exc := task.exception()):
         tb = format_exception(type(exc), exc, exc.__traceback__)
         logger.warning('Uncaught exception in %r:\n%s', task, '\n'.join(tb))
-
-
-def _time_print(*args):  # pragma: no cover
-    import time
-    print(round(time.monotonic(), 3), *args)
 
 
 def iscallable(obj):
