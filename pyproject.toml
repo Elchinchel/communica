@@ -25,8 +25,8 @@ adaptix = ["adaptix"]
 rabbitmq = ["aiormq", "yarl"]
 
 [project.urls]
-"Homepage" = "https://github.com/elchinchel/communica-py"
-"Bug Tracker" = "https://github.com/elchinchel/communica-py/issues"
+"Homepage" = "https://github.com/Elchinchel/communica-py"
+"Bug Tracker" = "https://github.com/Elchinchel/communica-py/issues"
 
 [build-system]
 requires = ["setuptools>=61.0.0", "wheel"]
