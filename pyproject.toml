@@ -1,6 +1,6 @@
 [project]
 name = "communica"
-version = "0.3.2"
+version = "0.3.2.post2"
 authors = [
   { name="Elchin Sarkarov", email="elchin751@gmail.com" },
 ]
@@ -25,8 +25,8 @@ adaptix = ["adaptix"]
 rabbitmq = ["aiormq", "yarl"]
 
 [project.urls]
-"Homepage" = "https://github.com/Elchinchel/communica-py"
-"Bug Tracker" = "https://github.com/Elchinchel/communica-py/issues"
+"Homepage" = "https://github.com/Elchinchel/communica"
+"Bug Tracker" = "https://github.com/Elchinchel/communica/issues"
 
 [build-system]
 requires = ["setuptools>=61.0.0", "wheel"]
