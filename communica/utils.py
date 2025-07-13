@@ -2,15 +2,18 @@ import logging
 import itertools
 import threading
 from random import gauss
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 from asyncio import Task, sleep, current_task, get_running_loop
 from inspect import isclass, ismethod, isfunction
 from operator import attrgetter
 from traceback import format_exception
 from collections import deque, defaultdict
 
+from typing_extensions import TypeAlias
+
 
 _TV = TypeVar('_TV')
+ByteSeq: TypeAlias = 'bytes | memoryview | bytearray'
 
 logger = logging.getLogger('communica')
 _task_counters = defaultdict(lambda: itertools.count())
@@ -21,30 +24,6 @@ NULL_CHAR = b'\x00'
 UINT32MAX = 2**32 - 1
 UINT16MAX = 2**16 - 1
 INT32RANGE = (-2**31, 2**31 - 1)
-
-
-try:
-    import orjson
-
-    _orjson_option = (
-        orjson.OPT_NON_STR_KEYS
-    )
-
-    def json_dumpb(obj: Any) -> bytes:
-        return orjson.dumps(obj, option=_orjson_option)
-
-    json_loadb = orjson.loads
-
-except ImportError:
-    import json
-
-    def json_dumpb(obj: Any) -> bytes:
-        return json.dumps(obj, ensure_ascii=False).encode('utf-8')
-
-    def json_loadb(__obj: bytes):
-        if isinstance(__obj, memoryview):
-            __obj = bytes(__obj)
-        return json.loads(__obj)
 
 
 _HasLoopMixin_lock = threading.Lock()

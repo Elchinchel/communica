@@ -13,8 +13,6 @@ from communica.utils import (
     NULL_CHAR,
     HasLoopMixin,
     BackoffDelayer,
-    json_dumpb,
-    json_loadb,
     fmt_task_name,
     read_accessor,
     exc_log_callback,
@@ -29,6 +27,7 @@ from communica.connectors.base import (
     RequestReceivedCB,
     BaseConnectorServer,
 )
+from communica.serializers.json import json_dumpb, json_loadb
 from communica.connectors.rabbitmq.pool import (
     ChannelPool,
     ChannelRoute,

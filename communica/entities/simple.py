@@ -10,6 +10,7 @@ from traceback import format_exc
 from dataclasses import dataclass
 
 from communica.utils import (
+    ByteSeq,
     TaskSet,
     HasLoopMixin,
     BackoffDelayer,
@@ -29,6 +30,7 @@ from communica.connectors.base import (
     HandshakeGen,
     BaseConnector,
     BaseConnection,
+    BaseConnectorServer,
 )
 
 
@@ -128,7 +130,7 @@ class ReqRepMessageFlow(HasLoopMixin):
             self,
             serializer: BaseSerializer,
             metadata: Metadata,
-            raw_data: bytes
+            raw_data: ByteSeq
     ):
         fut = self._response_waiters.pop(metadata['id'], None)
         if fut is None or fut.done():
@@ -167,7 +169,7 @@ class ReqRepMessageFlow(HasLoopMixin):
             handler: RequestHandler,
             serializer: BaseSerializer,
             metadata: Metadata,
-            raw_data: Any
+            raw_data: ByteSeq
     ) -> 'tuple[dict, Any]':
         resp_meta = metadata.copy()
 
@@ -228,7 +230,7 @@ class ReqRepMessageFlow(HasLoopMixin):
                            'requester don\'t know about this:\n' + resp_data['msg'])
 
     @abstractmethod
-    def dispatch(self, metadata: Any, raw_data: bytes): ...
+    def dispatch(self, metadata: Any, raw_data: ByteSeq): ...
 
 
 class SimpleMessageFlow(ReqRepMessageFlow):
@@ -243,7 +245,7 @@ class SimpleMessageFlow(ReqRepMessageFlow):
         self.handler = RequestHandler(handler)
         self.serializer = serializer
 
-    def dispatch(self, metadata: Metadata, raw_data: bytes):
+    def dispatch(self, metadata: Metadata, raw_data: ByteSeq):
         if metadata['type'] < RequestType.RESP_OK:
             self.handler.running_tasks.create_task_with_exc_log(
                 self.handle_request(metadata, raw_data),
@@ -252,7 +254,7 @@ class SimpleMessageFlow(ReqRepMessageFlow):
         else:
             self._handle_response(self.serializer, metadata, raw_data)
 
-    async def handle_request(self, req_meta: Metadata, raw_data: bytes):
+    async def handle_request(self, req_meta: Metadata, raw_data: ByteSeq):
         resp_meta, resp_data = await self._handle_request(
             self.handler, self.serializer, req_meta, raw_data
         )
@@ -404,7 +406,7 @@ class ReqRepServer(BaseServer, Generic[FlowT]):
     __slots__ = ('_server', '_known_clients', '_client_conn_runners',
                  '_client_connected')
 
-    _server: asyncio.AbstractServer
+    _server: BaseConnectorServer
     _client_conn_runners: 'dict[str, asyncio.Task]'
 
     # future waiter waits specific client

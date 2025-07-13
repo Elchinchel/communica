@@ -2,7 +2,7 @@ import asyncio
 from uuid import uuid4
 from typing import Any, TypedDict
 
-from communica.utils import TaskSet, logger, fmt_task_name
+from communica.utils import ByteSeq, TaskSet, logger, fmt_task_name
 from communica.exceptions import ReqError
 from communica.serializers import BaseSerializer, default_serializer
 from communica.entities.base import SyncHandlerType, AsyncHandlerType
@@ -54,7 +54,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
             serializer = default_serializer
         self.routes[route] = (RequestHandler(handler), serializer)
 
-    def dispatch(self, metadata: Metadata, raw_data: bytes):
+    def dispatch(self, metadata: Metadata, raw_data: ByteSeq):
         if metadata['type'] < RequestType.RESP_OK:
             try:
                 route_handle = self.routes[metadata['route']]
@@ -84,7 +84,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
             self,
             route_handle: 'tuple[RequestHandler, BaseSerializer] | None',
             req_meta: Metadata,
-            raw_data: bytes
+            raw_data: ByteSeq
         ):
         if route_handle is not None:
             handler, serializer = route_handle

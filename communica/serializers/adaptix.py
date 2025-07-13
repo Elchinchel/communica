@@ -7,17 +7,31 @@ except ModuleNotFoundError:
 
 from typing import Any, Type, Generic, TypeVar
 
-from communica.utils import json_dumpb, json_loadb
+from communica.utils import ByteSeq
 from communica.exceptions import FeatureNotAvailable
 from communica.serializers import BaseSerializer
+from communica.serializers.json import JsonSerializer
 
 
 TReq = TypeVar('TReq')
 TResp = TypeVar('TResp')
 
+DEFAULT_JSON_SERIALIZER = JsonSerializer()
+
 
 class AdaptixSerializer(BaseSerializer, Generic[TReq, TResp]):
-    __slots__ = ('_retort', '_req_model', '_resp_model')
+    """
+    This serializer passes data to `adaptix.Retort`
+
+    If you specify `request_model` as A and `response_model` as B:
+    - On request side, it dumps A (out) and loads B (in)
+    - On response side, it loads A (in) and dumps B (out)
+
+    So, validation ensured on both sides.
+    If the same serializer defined on both sides, of course.
+    """
+
+    __slots__ = ('_retort', '_req_model', '_resp_model', '_json')
 
     # XXX: один из вариантов
     # FROM_HANDLER = специальное значение
@@ -27,38 +41,54 @@ class AdaptixSerializer(BaseSerializer, Generic[TReq, TResp]):
 
     def __init__(
             self,
-            request_model: Type[TReq],
+            request_model: 'Type[TReq] | None',
             response_model: 'Type[TResp] | None' = None,
-            retort: 'adaptix.Retort | None' = None
+            retort: 'adaptix.Retort | None' = None,
+            json_serializer: 'JsonSerializer | None' = None,
     ) -> None:
+        """
+            Args:
+                request_model: Type of object, which will be sent
+                    from requester to responder.
+                    None means no validation/conversion performed.
+                response_model: Type of object, which will be sent
+                    from responder to requester.
+                    None means no validation/conversion performed.
+        """
+
         if not _HAVE_ADAPTIX:
             raise FeatureNotAvailable(
                 'AdaptixSerializer requires adaptix library. '
                 'Install communica with [adaptix] extra.'
             )
 
-        self._retort = retort or adaptix.Retort()
-        self._req_model = request_model
+        self._json = json_serializer or DEFAULT_JSON_SERIALIZER
+        self._retort = retort or adaptix.Retort()  # pyright: ignore[reportPossiblyUnboundVariable]
+        self._req_model = request_model or Any
         self._resp_model = response_model or Any
 
-    def load(self, raw_data: bytes) -> TReq:
+    def load(self, raw_data: ByteSeq) -> TReq:
+        'Load data as request_model'
         return self._retort.load(
-            json_loadb(raw_data),
+            self._json.load(raw_data),
             self._req_model
-        )
+        )  # pyright: ignore[reportReturnType]  # until typevar defaults available
 
     def dump(self, data: TResp) -> bytes:
-        return json_dumpb(
+        'Dump data as response_model'
+        return self._json.dump(
             self._retort.dump(data, self._resp_model)
         )
 
-    def client_load(self, raw_data: bytes) -> 'TResp | Any':
+    def client_load(self, raw_data: ByteSeq) -> TResp:
+        'Load data as response_model'
         return self._retort.load(
-            json_loadb(raw_data),
+            self._json.load(raw_data),
             self._resp_model
-        )
+        )  # pyright: ignore[reportReturnType]
 
     def client_dump(self, data: TReq) -> bytes:
-        return json_dumpb(
+        'Dump data as request_model'
+        return self._json.dump(
             self._retort.dump(data, self._req_model)
         )

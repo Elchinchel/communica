@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Any
 
+from communica.utils import ByteSeq
+
 
 class BaseSerializer(ABC):
     """
@@ -17,13 +19,13 @@ class BaseSerializer(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load(self, raw_data: bytes) -> Any:
+    def load(self, raw_data: ByteSeq) -> Any:
         raise NotImplementedError
 
-    # distinct methods if serialization on client side differs
+    # distinct methods if serialization on client (requesting) side differs
 
     def client_dump(self, data: Any) -> bytes:
         return self.dump(data)
 
-    def client_load(self, raw_data: bytes) -> Any:
+    def client_load(self, raw_data: ByteSeq) -> Any:
         return self.load(raw_data)

@@ -15,8 +15,6 @@ from communica.utils import (
     NULL_CHAR,
     UINT32MAX,
     MessageQueue,
-    json_dumpb,
-    json_loadb,
     fmt_task_name,
     read_accessor,
 )
@@ -31,6 +29,7 @@ from communica.connectors.base import (
     RequestReceivedCB,
     BaseConnectorServer,
 )
+from communica.serializers.json import json_dumpb, json_loadb
 from communica.connectors.stream import local_connections
 
 
@@ -84,7 +83,7 @@ class MessageFrame(Frame):
     CODE = 10
 
     metadata: Any
-    raw_data: bytes
+    raw_data: 'bytes | memoryview'
 
     @classmethod
     def _load(cls, data: memoryview):
