@@ -35,7 +35,13 @@ async def wait_second(coro):
     pytest.fail('Wait timeout exceeded', pytrace=False)
 
 
-async def wait_tasks(*tasks, timeout: int):
+async def wait_tasks(*awaitables, timeout: int):
+    tasks = []
+    for task in awaitables:
+        if not isinstance(task, asyncio.Future):
+            task = asyncio.create_task(task)
+        tasks.append(task)
+
     done, pending = await asyncio.wait(tasks, timeout=timeout)
     if not pending:
         return
