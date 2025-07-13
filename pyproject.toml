@@ -17,9 +17,6 @@ classifiers = [
 dependencies = ["typing-extensions"]
 
 [project.optional-dependencies]
-test = [ "pytest", "pytest-cov", "pytest-asyncio" ]
-docs = [ "sphinx", "myst-parser", "python-docs-theme", "sphinx-autodoc2" ]
-
 orjson = ["orjson"]
 adaptix = ["adaptix"]
 rabbitmq = ["aiormq", "yarl"]
