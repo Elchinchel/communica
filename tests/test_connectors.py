@@ -1,16 +1,17 @@
 import asyncio
 
 import pytest
-from utils_misc import create_task, create_string
 from utils_simple_entities_for_tests import (
     run_concurrent_send_with_simples,
     run_sequential_send_with_simples,
 )
 
+from tests.utils_misc import dummy_handshaker
 from communica.clients import SimpleClient
 from communica.servers import SimpleServer
-from communica.connectors import RmqConnector
+from communica.connectors import RmqConnector, LocalConnector
 from communica.serializers import default_serializer
+from communica.connectors.stream.connector import TcpConnector
 
 
 class FastDyingRmqConnector(RmqConnector):
@@ -91,3 +92,44 @@ class TestRmqConnector:
             chan = await rmq_connector.acquire_channel()
             await chan.inner.connection.close()
             await client.request(3)
+
+
+@pytest.mark.asyncio
+async def test_local_server_close_with_connections(local_connector):
+    await server_close_test_runner(local_connector)
+
+
+@pytest.mark.asyncio
+async def test_tcp_server_close_with_connections(tcp_connector):
+    await server_close_test_runner(tcp_connector)
+
+
+async def server_close_test_runner(
+    connector: 'LocalConnector | TcpConnector'
+):
+    server = await connector.server_start(
+        dummy_handshaker,
+        lambda connection: print('client connected'),
+    )
+    conn = await connector.client_connect(
+        dummy_handshaker
+    )
+    conn_runner = asyncio.create_task(
+        conn.run_until_fail(lambda metadata, raw_data: print('got message'))
+    )
+    await asyncio.sleep(0)
+
+    server.close()
+    wait_task = asyncio.create_task(server.wait_closed())
+    _, pending1 = await asyncio.wait([wait_task], timeout=1)
+    await conn.close()
+    conn_runner.cancel()
+    if not pending1:
+        return
+    done2, _ = await asyncio.wait([wait_task], timeout=1)
+    if done2:
+        pytest.fail('Server closing only after clients disconnect')
+
+    for task in asyncio.all_tasks():
+        print(task)
+    pytest.fail('Server not closing at all')

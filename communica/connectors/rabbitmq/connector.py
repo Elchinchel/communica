@@ -27,6 +27,7 @@ from communica.connectors.base import (
     BaseConnection,
     ClientConnectedCB,
     RequestReceivedCB,
+    BaseConnectorServer,
 )
 from communica.connectors.rabbitmq.pool import (
     ChannelPool,
@@ -465,7 +466,7 @@ class RmqConnection(BaseConnection):
             self._closing.set_result(None)
 
 
-class RmqServer(asyncio.AbstractServer):
+class RmqServer(BaseConnectorServer):
     _closing: 'asyncio.Future | Literal[True] | None'
     _restart_task: 'asyncio.Task | None'
 
@@ -682,12 +683,6 @@ class RmqServer(asyncio.AbstractServer):
             self._make_aiormq_channel_close_cb()
         )
 
-    def get_loop(self):
-        raise NotImplementedError
-
-    async def serve_forever(self):
-        raise NotImplementedError
-
 
 class RmqConnector(BaseConnector):
     """
@@ -778,7 +773,7 @@ class RmqConnector(BaseConnector):
             self,
             handshaker: Handshaker,
             client_connected_cb: ClientConnectedCB,
-    ) -> asyncio.AbstractServer:
+    ) -> BaseConnectorServer:
         chan = await self._pool.acquire_chan(self._url)
 
         await chan.inner.exchange_declare(

@@ -1,17 +1,17 @@
+import sys
 import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Protocol, Awaitable, AsyncGenerator
 
-from typing_extensions import Self
-
-from communica.utils import logger, json_dumpb, json_loadb
+from communica.utils import logger
+from communica.serializers.json import json_dumpb, json_loadb
 
 
 HandshakeGen = AsyncGenerator['dict | HandshakeOk', dict]
 
 
 class Handshaker(Protocol):
-    async def __call__(self, connection: 'BaseConnection') -> HandshakeGen: ...
+    def __call__(self, connection: 'BaseConnection') -> HandshakeGen: ...
 
 
 class ClientConnectedCB(Protocol):
@@ -19,7 +19,7 @@ class ClientConnectedCB(Protocol):
 
 
 class RequestReceivedCB(Protocol):
-    def __call__(self, metadata: Any, raw_data: bytes): ...
+    def __call__(self, metadata: Any, raw_data: 'bytes | memoryview'): ...
 
 
 class HandshakeOk: ...
@@ -115,8 +115,15 @@ class BaseConnection(ABC):
             await handshake_gen.aclose()
 
     @abstractmethod
-    def update(self, connection: Self) -> None:
-        """Must be called before run_until_fail"""
+    def update(self, connection) -> None:
+        """
+        Update information, required for connection use.
+        This method invoked after reconnect on the old
+        connection object with new connection as a parameter and
+        then old connection might be used for communication.
+
+        Must be called before run_until_fail.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -133,6 +140,25 @@ class BaseConnection(ABC):
     @abstractmethod
     async def close(self) -> None:
         raise NotImplementedError
+
+
+class BaseConnectorServer:
+    def __init__(self, server: asyncio.AbstractServer) -> None:
+        self.server = server  # pyright: ignore[reportGeneralTypeIssues]
+
+    def close(self) -> None:
+        self.server.close()
+
+    def is_serving(self) -> bool:
+        return self.server.is_serving()
+
+    if sys.version_info >= (3, 13):
+        async def wait_closed(self):
+            self.server.close_clients()
+            await self.server.wait_closed()
+    else:
+        async def wait_closed(self):
+            return
 
 
 class BaseConnector(ABC):
@@ -160,7 +186,7 @@ class BaseConnector(ABC):
             self,
             handshaker: Handshaker,
             client_connected_cb: ClientConnectedCB,
-    ) -> asyncio.AbstractServer:
+    ) -> BaseConnectorServer:
         raise NotImplementedError
 
     @abstractmethod

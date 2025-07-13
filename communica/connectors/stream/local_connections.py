@@ -3,32 +3,19 @@
 import sys
 import asyncio
 
+from communica.connectors.base import BaseConnectorServer
+
 
 IS_AVAILABLE = True
 
 
 if sys.platform == 'win32':
-    class PipeServerWrapper(asyncio.AbstractServer):
-        def __init__(self, server: asyncio.windows_events.PipeServer) -> None:
-            self.server = server
-
-        def close(self):
-            self.server.close()
-
+    class PipeConnectorServer(BaseConnectorServer):
         def is_serving(self):
             return not self.server.closed()
 
-        async def start_serving(self):
-            return
-
         async def wait_closed(self):
             return
-
-        def get_loop(self):
-            raise NotImplementedError
-
-        async def serve_forever(self):
-            raise NotImplementedError
 
 
     async def open_connection(
@@ -47,7 +34,7 @@ if sys.platform == 'win32':
 
     async def start_server(
             client_connected_cb, address: str
-    ) -> asyncio.AbstractServer:
+    ) -> BaseConnectorServer:
         loop = asyncio.get_event_loop()
         if not hasattr(loop, 'start_serving_pipe'):
             raise TypeError('Named pipes are not supported on current platform')
@@ -59,7 +46,7 @@ if sys.platform == 'win32':
             return protocol
 
         servers = await loop.start_serving_pipe(factory, format_address(address))
-        return PipeServerWrapper(servers[0])
+        return PipeConnectorServer(servers[0])
 
     def format_address(address: str) -> str:
         return '\\\\.\\pipe\\' + 'communica.' + address
@@ -81,9 +68,10 @@ elif hasattr(asyncio, 'open_unix_connection'):
 
     async def start_server(
             client_connected_cb, address: str
-    ) -> asyncio.AbstractServer:
+    ) -> BaseConnectorServer:
         sock_path = format_address(address)
-        return await asyncio.start_unix_server(client_connected_cb, sock_path)
+        server = await asyncio.start_unix_server(client_connected_cb, sock_path)
+        return BaseConnectorServer(server)
 
     def format_address(address: str) -> str:
         return os.path.join(SOCK_DIR, address + '.sock')

@@ -29,6 +29,7 @@ from communica.connectors.base import (
     BaseConnection,
     ClientConnectedCB,
     RequestReceivedCB,
+    BaseConnectorServer,
 )
 from communica.connectors.stream import local_connections
 
@@ -173,12 +174,13 @@ class StreamConnection(BaseConnection):
 
     async def close(self):
         close_chunk = CloseNotifyFrame.to_bytes_with_header()
-        self.writer.write(close_chunk)
+        with suppress(BrokenPipeError):
+            self.writer.write(close_chunk)
         self.writer.close()
         with suppress(AssertionError):
             self.reader.feed_data(close_chunk)
-
-        await self.writer.wait_closed()
+        with suppress(BrokenPipeError):
+            await self.writer.wait_closed()
 
     async def _run_connection(self, request_received_cb: RequestReceivedCB):
         is_closing = self.writer.is_closing
@@ -313,12 +315,13 @@ class TcpConnector(BaseStreamConnector):
             handshaker: Handshaker,
             client_connected_cb: ClientConnectedCB,
     ):
-        return await asyncio.start_server(
+        server = await asyncio.start_server(
             self._create_server_cb(handshaker, client_connected_cb),
             host=self.host,
             port=self.port,
             ssl=self.ssl
         )
+        return BaseConnectorServer(server)
 
     async def _open_connection(self):
         return await asyncio.open_connection(

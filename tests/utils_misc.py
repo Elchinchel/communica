@@ -5,6 +5,8 @@ from random import Random
 
 import pytest
 
+from communica.connectors.base import HandshakeOk
+
 
 tasks = set()
 logger = logging.getLogger()
@@ -25,6 +27,10 @@ def create_string(length: int, seed: int = 0):
 
 def dummy_handler(data):
     return data
+
+
+async def dummy_handshaker(connection):
+    yield HandshakeOk()
 
 
 async def wait_second(coro):
