@@ -376,7 +376,7 @@ class LocalConnector(BaseStreamConnector):
                 'for local processes, please file an issue to communica\'s'
                 'GitHub repository ("Bug Tracker" on PyPI page).'
             )
-        self._name = name.lower()
+        self._name = name.lower()  # XXX: any reason to do this?
 
     def repr_address(self) -> str:
         return local_connections.format_address(self._name)

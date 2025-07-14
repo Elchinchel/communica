@@ -37,7 +37,9 @@ pyvenv.cfg
 # Other
 /test.py
 upload.bat
+upload.sh
 coverage.lcov
+todo.md
 
 communica/connectors/nats.py
 docs/

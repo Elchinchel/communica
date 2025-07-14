@@ -36,6 +36,19 @@ _HasLoopMixin_lock = threading.Lock()
 
 
 class read_accessor(Generic[_TV]):
+    """
+    ```
+    class Foo:
+        url: read_accessor[str] = read_accessor('_url')
+    ```
+    is equivalent for
+    ```
+    class Foo:
+        @property
+        def url(self) -> str:
+            return self._url
+    ```
+    """
     __slots__ = ('_getter',)
 
     def __init__(self, path: str) -> None:
@@ -93,6 +106,7 @@ class TaskSet(HasLoopMixin):
 
 
 class MessageQueue(HasLoopMixin, Generic[_TV]):
+    # XXX: does slots make sense when __dict__ slot defined?
     __slots__ = ('_queue', '_max_items', '_get_waiter', '_put_waiters')
 
     def __init__(self, max_items: int) -> None:

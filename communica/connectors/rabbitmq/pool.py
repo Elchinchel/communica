@@ -205,9 +205,9 @@ class ChannelPool:
 
     def _check_loops(self):
         msg = '%r at 0x%02x is closed, but unclosed AMQP connection (%r) still '\
-            'associated with %r. This may lead to weird bugs, cause broker '\
-            'probably still think that connection exists. Before closing '\
-            'asyncio loop you should call .close(url) method on pool.\n%s'
+            'associated with %r. This may lead to weird bugs, as the broker '\
+            'likely still considers that connection exists. Before closing '\
+            'the asyncio loop you should call .close(url) method on the pool.\n%s'
 
         for loop, ctx in self._loop_contexts.items():
             if not loop.is_closed() or not ctx.connections:

@@ -1,23 +1,45 @@
+"""
+This is an example of worker client, which gets
+requests from server, processing them
+(fetching some additional info from server in process)
+and returns back to server.
+
+Server requests processing with "process_something".
+After everything is done, server shuts client down,
+requesting "close_connection" route.
+"""
+
 import asyncio
+from typing import Any
 
-from communica.clients import RouteClient
-from communica.connectors import TcpConnector
+from communica import RouteClient, LocalConnector
 
 
-connector = TcpConnector('localhost', 16161)
-
+connector = LocalConnector('foobar')
 client = RouteClient(connector=connector)
 
 
-@client.route_handler('server_hello')
-def handle_hello_from_server(data: str):
-    print('Handling hello from server, data:', repr(data))
+@client.routes.handler('process_something')
+async def handle_hello_from_server(data: Any):
+    print('Processing data from server:', data)
+    await asyncio.sleep(1)
+    info = await client.request(
+        'get_some_info_about',
+        {'subject': 'goose'}
+    )
+    print('Got info from server:', info)
+    return data
 
 
-@client.route_handler('close_connection')
-def close_client(data: str):
-    print('Received "close_connection" request')
-    asyncio.create_task(client.close())
+@client.routes.handler('close_client')
+async def close_client(data: None):
+    print('Received "close_client" request')
+    client.stop()
+    # at this moment connection likely have no chance
+    # to send response back, that's why "throw" used
+    # on requesting side.
 
 
-asyncio.run(client.run())
+if __name__ == '__main__':
+    asyncio.run(client.run())
+    print('client is closed')
