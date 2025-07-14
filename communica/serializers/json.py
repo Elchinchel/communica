@@ -51,7 +51,7 @@ except ModuleNotFoundError:
     class OrjsonSerializer(JsonSerializer):
         def __init__(
                 self,
-                orjson_dump_option: int = orjson.OPT_NON_STR_KEYS
+                orjson_dump_option: int = 0
         ) -> None:
             raise FeatureNotAvailable(
                 'OrjsonSerializer requires orjson library. '
