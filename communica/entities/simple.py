@@ -5,7 +5,6 @@ from abc import abstractmethod
 from enum import Enum
 from uuid import uuid1, uuid4
 from typing import Any, Generic, TypeVar, TypedDict, cast
-from inspect import iscoroutinefunction
 from traceback import format_exc
 from dataclasses import dataclass
 
@@ -14,7 +13,6 @@ from communica.utils import (
     TaskSet,
     HasLoopMixin,
     BackoffDelayer,
-    iscallable,
     fmt_task_name,
 )
 from communica.exceptions import ReqError, RespError, UnknownError, SerializerError
@@ -22,6 +20,7 @@ from communica.serializers import BaseSerializer, default_serializer
 from communica.entities.base import (
     BaseClient,
     BaseServer,
+    RequestHandler,
     SyncHandlerType,
     AsyncHandlerType,
 )
@@ -70,36 +69,12 @@ class Metadata(TypedDict):
     id: str
 
 
-class RequestHandler:
-    __slots__ = ('_repr', 'is_async', 'endpoint', 'running_tasks')
-
-    is_async: bool
-    endpoint: 'SyncHandlerType | AsyncHandlerType'
-    running_tasks: TaskSet
-
-    def __repr__(self) -> str:
-        try:
-            return self._repr
-        except AttributeError:
-            name = getattr(self.endpoint, '__qualname__',
-                           getattr(self.endpoint, '__name__', 'UNKNOWN'))
-            htype = 'async' if self.is_async else 'sync'
-            self._repr = f'<RequestHandler {htype} endpoint={name}>'
-            return self._repr
-
-    def __init__(self, endpoint: 'SyncHandlerType | AsyncHandlerType') -> None:
-        if not iscallable(endpoint):
-            raise TypeError('Request handler must be function, '
-                            'coroutine function or method')
-        self.is_async = iscoroutinefunction(endpoint)
-        self.endpoint = endpoint
-        self.running_tasks = TaskSet()
-
-
 class ReqRepMessageFlow(HasLoopMixin):
     __slots__ = (
-        '_connection', '_response_waiters'
+        'task_set', '_connection', '_response_waiters'
     )
+
+    task_set: TaskSet
 
     _response_waiters: 'dict[str, asyncio.Future]'
 
@@ -108,6 +83,7 @@ class ReqRepMessageFlow(HasLoopMixin):
         return self._connection
 
     def __init__(self):
+        self.task_set = TaskSet()
         self._response_waiters = {}
 
     def update_connection(self, connection: BaseConnection):
@@ -247,9 +223,9 @@ class SimpleMessageFlow(ReqRepMessageFlow):
 
     def dispatch(self, metadata: Metadata, raw_data: ByteSeq):
         if metadata['type'] < RequestType.RESP_OK:
-            self.handler.running_tasks.create_task_with_exc_log(
+            self.task_set.create_task_with_exc_log(
                 self.handle_request(metadata, raw_data),
-                name=fmt_task_name('simple-request-handler')
+                name=fmt_task_name('request-handler')
             )
         else:
             self._handle_response(self.serializer, metadata, raw_data)
@@ -429,7 +405,7 @@ class ReqRepServer(BaseServer, Generic[FlowT]):
 
         for client_id, flow in self._known_clients.items():
             if isinstance(flow, ReqRepMessageFlow):
-                self._cancel_handler_tasks(flow)
+                flow.task_set.cancel()
                 await flow._connection.close()
             if (conn_task := self._client_conn_runners.get(client_id)):
                 conn_task.cancel()
@@ -502,10 +478,6 @@ class ReqRepServer(BaseServer, Generic[FlowT]):
             logger.info('Exception details:', exc_info=exc)
 
     @abstractmethod
-    def _cancel_handler_tasks(self, flow: FlowT):
-        raise NotImplementedError
-
-    @abstractmethod
     def _create_new_flow(self) -> FlowT:
         raise NotImplementedError
 
@@ -537,9 +509,6 @@ class SimpleServer(ReqRepServer[SimpleMessageFlow]):
         self._known_clients = {}
         self._client_connected = asyncio.Event()
         self._client_conn_runners = {}
-
-    def _cancel_handler_tasks(self, flow: SimpleMessageFlow):
-        flow.handler.running_tasks.cancel()
 
     def _create_new_flow(self) -> SimpleMessageFlow:
         return SimpleMessageFlow(self._handler, self._serializer)

@@ -1,11 +1,13 @@
 import asyncio
+from abc import ABC, abstractmethod
+from typing import Any, Protocol
+from inspect import iscoroutinefunction
+from functools import wraps, partial
+from concurrent.futures import ThreadPoolExecutor
 
-from abc import abstractmethod, ABC
-from typing import Protocol, Any
+from typing_extensions import Self, TypeAlias
 
-from typing_extensions import Self
-
-from communica.utils import HasLoopMixin, logger
+from communica.utils import HasLoopMixin, iscallable
 from communica.connectors.base import BaseConnector
 
 
@@ -100,9 +102,52 @@ class BaseServer(BaseEntity):
         raise NotImplementedError
 
 
+HandlerType: TypeAlias = 'SyncHandlerType | AsyncHandlerType | RequestHandler'
+
+
 class SyncHandlerType(Protocol):
     def __call__(self, data: Any) -> Any: ...
 
 
 class AsyncHandlerType(Protocol):
     async def __call__(self, data: Any) -> Any: ...
+
+
+class RequestHandler:
+    __slots__ = ('_repr', 'is_async', 'endpoint')
+
+    is_async: bool
+    endpoint: 'SyncHandlerType | AsyncHandlerType'
+
+    def __repr__(self) -> str:
+        try:
+            return self._repr
+        except AttributeError:
+            name = getattr(self.endpoint, '__qualname__',
+                           getattr(self.endpoint, '__name__', 'UNKNOWN'))
+            htype = 'async' if self.is_async else 'sync'
+            self._repr = f'<RequestHandler {htype} endpoint={name}>'
+            return self._repr
+
+    def __init__(self, endpoint: 'SyncHandlerType | AsyncHandlerType') -> None:
+        if not iscallable(endpoint):
+            raise TypeError('Request handler must be function, '
+                            'coroutine function or method')
+        self.is_async = iscoroutinefunction(endpoint)
+        self.endpoint = endpoint
+
+
+def threaded_handler(executor: 'ThreadPoolExecutor | None' = None):
+    """
+    Returns decorator, which returns RequestHandler, which runs
+    decorated function in separate thread.
+    """
+    def decorator(handler: SyncHandlerType):
+        # TODO: test with auto serializer
+        @wraps(handler)
+        async def wrapper(*args, **kwargs):
+            loop = asyncio.get_running_loop()
+            func = partial(handler, *args, **kwargs)
+            return await loop.run_in_executor(executor, func)
+        return RequestHandler(handler)
+    return decorator

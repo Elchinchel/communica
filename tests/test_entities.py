@@ -13,12 +13,23 @@ from utils_simple_entities_for_tests import (
 )
 
 from communica.entities import RouteClient, RouteServer, SimpleClient, SimpleServer
-from communica.exceptions import ReqError, RespError, UnknownError, SerializerError
+from communica.exceptions import (
+    ReqError,
+    RespError,
+    UnknownError,
+    SerializerError,
+    RouteOverrideError,
+)
 from communica.serializers import AdaptixSerializer
 from communica.entities.base import BaseEntity
+from communica.entities.route import RouteTable
 
 
 class TestBaseEntities:
+    class Connector:
+        def repr_address(self):
+            return '<dummy>'
+
     class Entity(BaseEntity):
         async def init(self):
             return self
@@ -26,8 +37,8 @@ class TestBaseEntities:
         async def close(self):
             pass
 
-    async def test_double_run_call(self, connector):
-        entity = self.Entity(connector)
+    async def test_double_run_call(self):
+        entity = self.Entity(self.Connector())  # pyright: ignore[reportArgumentType]
 
         runner = asyncio.create_task(entity.run())
 
@@ -40,7 +51,7 @@ class TestBaseEntities:
 
 
 class TestSimpleEntities:
-    async def test_error_handling(self, connector, serializer):
+    async def test_error_handling(self, local_connector):
         async def handler(data):
             if data == 1:
                 raise ValueError('hello')
@@ -49,8 +60,8 @@ class TestSimpleEntities:
             else:
                 raise ReqError('dude no such data', 404)
 
-        client = SimpleClient(connector)
-        server = SimpleServer(connector, handler)
+        client = SimpleClient(local_connector)
+        server = SimpleServer(local_connector, handler)
 
         async with server, client:
             with pytest.raises(UnknownError, match=r'ValueError.+hello'):
@@ -78,19 +89,19 @@ class TestSimpleEntities:
 
 
 class TestRouteEntities:
-    async def test_error_handling(self, connector, serializer):
-        client = RouteClient(connector)
-        server = RouteServer(connector)
+    async def test_error_handling(self, local_connector):
+        client = RouteClient(local_connector)
+        server = RouteServer(local_connector)
 
-        @server.route_handler('1')
+        @server.routes.handler('1')
         async def handler_1(data):
             raise ValueError('hello')
 
-        @server.route_handler('2')
+        @server.routes.handler('2')
         async def handler_2(data):
             raise RespError('im sorry', 500)
 
-        @server.route_handler('3')
+        @server.routes.handler('3')
         async def handler_3(data):
             raise ReqError('dude no such data', 404)
 
@@ -110,32 +121,33 @@ class TestRouteEntities:
                 assert e.code == 404
                 assert e.message == 'dude no such data'
 
-    async def test_bad_route(self, connector):
-        client = RouteClient(connector)
-        server = RouteServer(connector)
+    async def test_bad_route(self, local_connector):
+        client = RouteClient(local_connector)
+        server = RouteServer(local_connector)
 
         async with server, client:
             with pytest.raises(ReqError):
                 await wait_second(client.request('', None))
 
-    async def test_flow_update(self, connector):
-        client = RouteClient(connector)
-        server = RouteServer(connector)
+    async def test_flow_update(self, local_connector):
+        client = RouteClient(local_connector)
+        server = RouteServer(local_connector)
 
-        server.route_handler('existed')(dummy_handler)
+        server.routes.handler('existed')(dummy_handler)
 
         async with server, client:
             await wait_second(client.request('existed', None))
 
-            server.route_handler('new')(dummy_handler)
+            server.routes.handler('new')(dummy_handler)
 
             await wait_second(client.request('new', None))
 
-    async def test_bad_serializer(self, connector):
-        client = RouteClient(connector)
-        server = RouteServer(connector)
+    async def test_bad_serializer(self, local_connector):
+        # XXX: what is this test actually testing?
+        client = RouteClient(local_connector)
+        server = RouteServer(local_connector)
 
-        @server.route_handler(
+        @server.routes.handler(
             'hello',
             AdaptixSerializer(request_model=str)
         )
@@ -156,7 +168,7 @@ class TestRouteEntities:
                 ))
 
     @pytest.mark.asyncio
-    async def test_routing(self, connector, serializer):
+    async def test_routing(self, local_connector):
         async def run(entity: 'RouteClient | RouteServer', messages, done_event):
             for message in messages[:10]:
                 resp = await entity.request(str(message), message)
@@ -166,18 +178,18 @@ class TestRouteEntities:
             await done_event.wait()
 
         def add_handler(entity: 'RouteClient | RouteServer', route_id: str, checker):
-            @entity.route_handler(route_id)
+            @entity.routes.handler(route_id)
             async def handler(data):
                 a = await checker.handler(data)
                 return a
 
         cli_checker = MessageExistenceChecker(server_to_client_messages)
-        client = RouteClient(connector)
+        client = RouteClient(local_connector)
         for message in server_to_client_messages:
             add_handler(client, str(message), cli_checker)
 
         srv_checker = MessageExistenceChecker(client_to_server_messages)
-        server = RouteServer(connector)
+        server = RouteServer(local_connector)
         for message in client_to_server_messages:
             add_handler(server, str(message), srv_checker)
 
@@ -188,3 +200,18 @@ class TestRouteEntities:
                 timeout=5
             )
 
+    def test_route_override(self):
+        table1 = RouteTable('table1')
+        table2 = RouteTable('table2')
+        table3 = RouteTable('table3')
+        table4 = RouteTable('table4')
+
+        table1.add_route('foo', lambda data: None, None)
+        table2.add_route('bar', lambda data: None, None)
+        table3.add_route('hello', lambda data: None, None)
+        table4.add_route('bar', lambda data: None, None)
+
+        table = RouteTable._join_route_tables([table1, table2, table3])
+
+        with pytest.raises(RouteOverrideError):
+            RouteTable._join_route_tables([table, table4])

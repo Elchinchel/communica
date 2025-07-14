@@ -11,6 +11,12 @@ class FeatureNotAvailable(CommunicaError):
     """
 
 
+class RouteOverrideError(CommunicaError):
+    """
+    Route already exists
+    """
+
+
 class SerializerError(CommunicaError):
     """Error on loading or dumping data"""
 

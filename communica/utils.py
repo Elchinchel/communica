@@ -175,12 +175,16 @@ def exc_log_callback(task: Task):
         logger.warning('Uncaught exception in %r:\n%s', task, '\n'.join(tb))
 
 
-def iscallable(obj):
+def iscallable(obj, _prev=None):
     if isfunction(obj):
         return True
     if isclass(obj):
         return False
-    return ismethod(obj)
+    if ismethod(obj):
+        return True
+    if obj is _prev:
+        return False
+    return iscallable(getattr(obj, '__call__', None), obj)
 
 
 def cycle_range(start: int, stop: int):

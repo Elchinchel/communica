@@ -1,11 +1,13 @@
 import asyncio
 from uuid import uuid4
-from typing import Any, TypedDict
+from typing import Any, Iterable, TypedDict
+
+from typing_extensions import Self
 
 from communica.utils import ByteSeq, TaskSet, logger, fmt_task_name
-from communica.exceptions import ReqError
+from communica.exceptions import ReqError, RouteOverrideError
 from communica.serializers import BaseSerializer, default_serializer
-from communica.entities.base import SyncHandlerType, AsyncHandlerType
+from communica.entities.base import HandlerType
 from communica.connectors.base import (
     BaseConnector,
 )
@@ -30,40 +32,124 @@ class Metadata(TypedDict):
     route: str
 
 
+class RouteTable:
+    """
+    This object allows you to register routes in global variable
+    and then use them when creating RouteServer or RouteClient.
+    """
+
+    __slots__ = ('route_map', 'name')
+
+    route_map: 'dict[str, tuple[RequestHandler, BaseSerializer]]'
+
+    def __init__(self, name: 'str | None' = None) -> None:
+        self.name = name or 'unnamed'
+        self.route_map = {}
+
+    def __repr__(self):
+        clsname = self.__class__.__name__
+        return f'<{clsname} name={self.name}>'
+
+    def add_route(
+            self,
+            route: str,
+            handler: HandlerType,
+            serializer: 'BaseSerializer | None'
+    ):
+        if route in self.route_map:
+            raise RouteOverrideError(f'Route {route!r} already defined')
+
+        if serializer is None:
+            serializer = default_serializer
+        if not isinstance(handler, RequestHandler):
+            handler = RequestHandler(handler)
+        self.route_map[route] = (handler, serializer)
+
+    def handler(
+            self,
+            route: str,
+            serializer: 'BaseSerializer | None' = None
+    ):
+        """
+        Register handler for route.
+
+        Args:
+            route: Handler identifier.
+            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
+                Defaults to JsonSerializer.
+        """
+        def decorator(handler: HandlerType):
+            self.add_route(route, handler, serializer)
+            if isinstance(handler, RequestHandler):
+                return handler.endpoint
+            return handler
+
+        return decorator
+
+    def __getitem__(self, __key: str) -> 'tuple[RequestHandler, BaseSerializer]':
+        return self.route_map[__key]
+
+    @classmethod
+    def _join_route_tables(
+            cls,
+            anothers: 'Iterable[Self | None] | Self | None'
+    ) -> Self:
+        """
+        Create new table with routes from anothers.
+        """
+        result_table = cls()
+
+        def add_table(table: 'RouteTable | None'):
+            if table is None:
+                return
+            for route, value in table.route_map.items():
+                if route in result_table.route_map:
+                    break
+                result_table.route_map[route] = value
+            else:
+                return
+
+            for antable in anothers:  # pyright: ignore
+                if route not in antable.route_map:
+                    continue
+                raise RouteOverrideError(
+                    f'Can\'t join {antable} with {table}: '
+                    f'route {route!r} already defined.'
+                )
+
+        if anothers is None or isinstance(anothers, RouteTable):
+            add_table(anothers)
+            if anothers is not None:
+                result_table.name = anothers.name
+        else:
+            for table in anothers:
+                add_table(table)
+            result_table.name = 'joined'
+        return result_table
+
+
 class RouteMessageFlow(ReqRepMessageFlow):
     __slots__ = ('routes', 'fallback_task_set', '_response_serializers',)
 
-    routes: 'dict[str, tuple[RequestHandler, BaseSerializer]]'
+    routes: RouteTable
     fallback_task_set: TaskSet
 
     _response_serializers: 'dict[str, BaseSerializer]'
 
-    def __init__(self):
+    def __init__(self, route_table: RouteTable):
         super().__init__()
-        self.routes = {}
+        self.routes = route_table
         self.fallback_task_set = TaskSet()
         self._response_serializers = {}
-
-    def update_route(
-            self,
-            route: str,
-            handler: 'SyncHandlerType | AsyncHandlerType',
-            serializer: 'BaseSerializer | None'
-    ):
-        if serializer is None:
-            serializer = default_serializer
-        self.routes[route] = (RequestHandler(handler), serializer)
 
     def dispatch(self, metadata: Metadata, raw_data: ByteSeq):
         if metadata['type'] < RequestType.RESP_OK:
             try:
                 route_handle = self.routes[metadata['route']]
-                task_set = route_handle[0].running_tasks
             except KeyError:
                 route_handle = None
-                task_set = self.fallback_task_set
 
-            task_set.create_task_with_exc_log(
+            self.task_set.create_task_with_exc_log(
                 self.handle_request(route_handle, metadata, raw_data),
                 name=fmt_task_name('route-request-handler')
             )
@@ -96,7 +182,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
             resp_meta = req_meta.copy()
             resp_meta['type'] = RequestType.RESP_ERR_REQUESTER
             resp_data = \
-                ReqError(f'Route "{req_meta["route"]}" not exists').to_dict()
+                ReqError(f'Route "{req_meta["route"]}" is not defined').to_dict()
 
         await self._send_response(req_meta, resp_meta, resp_data, serializer)
 
@@ -106,6 +192,7 @@ class RouteMessageFlow(ReqRepMessageFlow):
             serializer: 'BaseSerializer | None',
             data: Any
     ) -> bytes:
+        # TODO: timeout
         request_id, fut = self._create_response_waiter()
 
         serializer = serializer or default_serializer
@@ -144,35 +231,27 @@ class RouteClient(ReqRepClient[RouteMessageFlow]):
 
     __slots__ = ()
 
+    @property
+    def routes(self):
+        return self._flow.routes
+
     def __init__(
             self,
             connector: BaseConnector,
-            client_id: 'str | None' = None
+            client_id: 'str | None' = None,
+            route_table: 'Iterable[RouteTable] | RouteTable | None' = None
     ) -> None:
         super().__init__(connector)
 
-        self._flow = RouteMessageFlow()
-
+        self._flow = RouteMessageFlow(
+            RouteTable._join_route_tables(route_table)
+        )
         self._run_task = None
         self._client_id = client_id or uuid4().hex
 
-    def route_handler(
-            self,
-            route: str,
-            serializer: 'BaseSerializer | None' = None
-    ):
-        """
-        Register handler for route
-
-        Args:
-            route: Handler identifier.
-            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
-                Defaults to JsonSerializer.
-        """
-        def decorator(endpoint: 'SyncHandlerType | AsyncHandlerType'):
-            self._flow.update_route(route, endpoint, serializer)
-
-        return decorator
+    def route_handler(self, *args, **kwargs):
+        "Deprecated"
+        return self.routes.handler(*args, **kwargs)
 
     async def request(
             self,
@@ -201,6 +280,7 @@ class RouteClient(ReqRepClient[RouteMessageFlow]):
     ) -> None:
         """
         Send request without waiting response.
+        However, this method will block until data is sent.
 
         Args:
             route: Handler identifier.
@@ -220,52 +300,33 @@ class RouteServer(ReqRepServer[RouteMessageFlow]):
     Handler searched by exact match of route string.
     """
 
-    __slots__ = ('_routes',)
+    __slots__ = ('_route_table',)
 
+    _route_table: RouteTable
     _known_clients: 'dict[str, RouteMessageFlow | asyncio.Future[RouteMessageFlow]]'
+
+    @property
+    def routes(self):
+        return self._route_table
 
     def __init__(
             self,
             connector: BaseConnector,
+            route_table: 'RouteTable | None' = None
     ) -> None:
         self.connector = connector
-        self._routes = []
         self._known_clients = {}
         self._client_connected = asyncio.Event()
         self._client_conn_runners = {}
 
-    def route_handler(
-            self,
-            route: str,
-            serializer: 'BaseSerializer | None' = None
-    ):
-        """
-        Register handler for route
-
-        Args:
-            route: Handler identifier.
-            serializer: Instance of :obj:`communica.serializers.BaseSeralizer`.
-                Defaults to JsonSerializer.
-        """
-        def decorator(endpoint: 'SyncHandlerType | AsyncHandlerType'):
-            for flow in self._known_clients.values():
-                if isinstance(flow, RouteMessageFlow):
-                    flow.update_route(route, endpoint, serializer)
-            self._routes.append((route, endpoint, serializer))
-
-        return decorator
-
-    def _cancel_handler_tasks(self, flow: RouteMessageFlow):
-        flow.fallback_task_set.cancel()
-
-        for handler, _ in flow.routes.values():
-            handler.running_tasks.cancel()
+        self._route_table = RouteTable._join_route_tables(route_table)
 
     def _create_new_flow(self) -> RouteMessageFlow:
-        flow = RouteMessageFlow()
-        for route, handler, serializer in self._routes:
-            flow.update_route(route, handler, serializer)
-        return flow
+        return RouteMessageFlow(self._route_table)
+
+    def route_handler(self, *args, **kwargs):
+        "Deprecated"
+        return self.routes.handler(*args, **kwargs)
 
     async def request(
             self,
