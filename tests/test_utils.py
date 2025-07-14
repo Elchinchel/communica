@@ -1,4 +1,6 @@
-from communica.utils import iscallable
+import pytest
+
+from communica.utils import LateBoundFuture, iscallable
 
 
 class CallableObject:
@@ -32,3 +34,20 @@ def test_iscallable():
     assert not iscallable(None)
     assert not iscallable(int)
     assert not iscallable('?')
+
+
+@pytest.mark.asyncio
+async def test_late_bound_future():
+    fut = LateBoundFuture()
+    assert fut.get_loop()
+
+    fut = LateBoundFuture()
+    fut.set_result(1)
+    assert await fut == 1
+
+    fut = LateBoundFuture()
+    fut.set_exception(KeyError)
+    with pytest.raises(KeyError):
+        fut.result()
+
+    LateBoundFuture().add_done_callback(lambda _: ...)

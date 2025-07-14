@@ -13,6 +13,7 @@ from communica.utils import (
     TaskSet,
     HasLoopMixin,
     BackoffDelayer,
+    LateBoundFuture,
     fmt_task_name,
 )
 from communica.exceptions import ReqError, RespError, UnknownError, SerializerError
@@ -157,6 +158,7 @@ class ReqRepMessageFlow(HasLoopMixin):
             return resp_meta, resp_data  # type: ignore
 
         try:
+            # TODO: pass client_id and other metadata
             if handler.is_async:
                 resp_data = await handler.endpoint(data)
             else:
@@ -385,10 +387,10 @@ class ReqRepServer(BaseServer, Generic[FlowT]):
     _server: BaseConnectorServer
     _client_conn_runners: 'dict[str, asyncio.Task]'
 
-    # future waiter waits specific client
+    # waiter waits specific client
     _known_clients: 'dict[str, FlowT | asyncio.Future[FlowT]]'
-    # event waiter waits any client
-    _client_connected: asyncio.Event
+    # waiter waits any client
+    _client_connected: 'asyncio.Future[FlowT]'
 
     async def init(self):
         if not hasattr(self, '_server') or not self._server.is_serving():
@@ -428,7 +430,7 @@ class ReqRepServer(BaseServer, Generic[FlowT]):
         if client_id is None:
             connected_clients = self._get_connected_clients()
             if not connected_clients:
-                await self._client_connected.wait()
+                return await asyncio.shield(self._client_connected)
             return random.choice(connected_clients)
 
         flow = self._known_clients.get(client_id)
@@ -452,8 +454,8 @@ class ReqRepServer(BaseServer, Generic[FlowT]):
             flow = new_flow
 
         connection = flow.update_connection(connection)
-        self._client_connected.set()
-        self._client_connected.clear()
+        self._client_connected.set_result(flow)
+        self._client_connected = loop.create_future()
 
         task = loop.create_task(
             connection.run_until_fail(flow.dispatch),
@@ -507,8 +509,11 @@ class SimpleServer(ReqRepServer[SimpleMessageFlow]):
         self.connector = connector
         self._serializer = serializer
         self._known_clients = {}
-        self._client_connected = asyncio.Event()
         self._client_conn_runners = {}
+
+        # this is for case, when user creates instance
+        # of client out of loop context (i.e. on module level)
+        self._client_connected = LateBoundFuture()
 
     def _create_new_flow(self) -> SimpleMessageFlow:
         return SimpleMessageFlow(self._handler, self._serializer)

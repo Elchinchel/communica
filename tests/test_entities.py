@@ -81,11 +81,24 @@ class TestSimpleEntities:
 
             await client.throw(1)
 
-    async def test_sequential_send(self, connector, serializer):
-        await run_sequential_send_with_simples(connector, serializer)
+    async def test_sequential_send(self, local_connector, serializer):
+        await run_sequential_send_with_simples(local_connector, serializer)
 
-    async def test_concurrent_send(self, connector, serializer):
-        await run_concurrent_send_with_simples(connector, serializer)
+    async def test_concurrent_send(self, local_connector, serializer):
+        await run_concurrent_send_with_simples(local_connector, serializer)
+
+    async def test_wait_for_client(self, local_connector):
+        server = SimpleServer(local_connector, lambda data: None)
+        client = SimpleClient(local_connector, lambda data: 'pivo')
+
+        async with server:
+            wait_task = asyncio.create_task(
+                wait_second(server.request({}))
+            )
+            await asyncio.sleep(0.1)
+            async with client:
+                await asyncio.sleep(1)
+            assert await wait_task == 'pivo'
 
 
 class TestRouteEntities:

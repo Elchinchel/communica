@@ -4,7 +4,7 @@ from typing import Any, Iterable, TypedDict
 
 from typing_extensions import Self
 
-from communica.utils import ByteSeq, TaskSet, logger, fmt_task_name
+from communica.utils import ByteSeq, TaskSet, LateBoundFuture, logger, fmt_task_name
 from communica.exceptions import ReqError, RouteOverrideError
 from communica.serializers import BaseSerializer, default_serializer
 from communica.entities.base import HandlerType
@@ -312,11 +312,11 @@ class RouteServer(ReqRepServer[RouteMessageFlow]):
     def __init__(
             self,
             connector: BaseConnector,
-            route_table: 'RouteTable | None' = None
+            route_table: 'Iterable[RouteTable] | RouteTable | None' = None
     ) -> None:
         self.connector = connector
         self._known_clients = {}
-        self._client_connected = asyncio.Event()
+        self._client_connected = LateBoundFuture()
         self._client_conn_runners = {}
 
         self._route_table = RouteTable._join_route_tables(route_table)

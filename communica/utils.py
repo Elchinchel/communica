@@ -2,8 +2,14 @@ import logging
 import itertools
 import threading
 from random import gauss
-from typing import Generic, TypeVar
-from asyncio import Task, sleep, current_task, get_running_loop
+from typing import Any, Generic, TypeVar
+from asyncio import (
+    Task,
+    Future,
+    sleep,
+    current_task,
+    get_running_loop,
+)
 from inspect import isclass, ismethod, isfunction
 from operator import attrgetter
 from traceback import format_exception
@@ -135,6 +141,32 @@ class MessageQueue(HasLoopMixin, Generic[_TV]):
                 break
 
         return self._queue.popleft()
+
+
+class LateBoundFuture(Future[_TV], HasLoopMixin):
+    """
+    This future sets loop to itself only on first access
+    (default future sets it in __init__).
+
+    It also contains incorrect source_traceback.
+    """
+
+    def __init__(self, *, loop=None) -> None:
+        pass
+
+    def get_loop(self):
+        is_initialized = bool(self._bound_loop)
+        loop = self._get_loop()
+        if not is_initialized:
+            super().__init__(loop=loop)
+        return loop
+
+    def __getattribute__(self, name: str) -> Any:
+        passthrough = ('get_loop', '_get_loop', '_bound_loop')
+        if name in passthrough or name.startswith('__'):
+            return super().__getattribute__(name)
+        self.get_loop()
+        return super().__getattribute__(name)
 
 
 class BackoffDelayer:

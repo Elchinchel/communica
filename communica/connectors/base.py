@@ -49,6 +49,9 @@ class BaseConnection(ABC):
         except AttributeError:
             return False
 
+    def __repr__(self):
+        return f'<{self.__class__.__name__} is_alive={self.is_alive}>'
+
     def get_handshake_result(self) -> HandshakeOk:
         """
         Get result of recent handshake.
