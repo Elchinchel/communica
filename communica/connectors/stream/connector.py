@@ -106,44 +106,52 @@ class MessageFrame(Frame):
 class ChunkedMessageFrame(Frame):
     CODE = 11
 
-    message_id: int
     chunk_index: int
     total_chunks: int
-    metadata: Any
+    metadata: 'bytes | None'
     raw_data: 'bytes | memoryview'
 
-    # Packer for message_id, chunk_index, total_chunks (3 x uint32)
-    CHUNK_HEADER_PACKER = Struct('!III')
+    # Packer for chunk_index, total_chunks (2 x uint32)
+    CHUNK_HEADER_PACKER = Struct('!II')
     chunk_header_size = CHUNK_HEADER_PACKER.size
     chunk_header_pack = CHUNK_HEADER_PACKER.pack
     chunk_header_unpack_from = CHUNK_HEADER_PACKER.unpack_from
 
     @classmethod
     def _load(cls, data: memoryview):
-        message_id, chunk_index, total_chunks = cls.chunk_header_unpack_from(data)
-        metadata_end_offset = cls.length_unpack_from(
-            data, cls.chunk_header_size
-        )[0]
-        metadata_start = cls.chunk_header_size + cls.length_size
+        chunk_index, total_chunks = cls.chunk_header_unpack_from(data, offset=0)
+
+        # Check if this is the first chunk (contains metadata)
+        if chunk_index == 0:
+            metadata_length = cls.length_unpack_from(data, offset=cls.chunk_header_size)[0]
+            metadata_start = cls.chunk_header_size + cls.length_size
+            metadata_end = metadata_start + metadata_length
+            metadata = data[metadata_start:metadata_end]
+            raw_data = data[metadata_end:]
+        else:
+            # Non-first chunks have no metadata
+            metadata = None
+            raw_data = data[cls.chunk_header_size:]
+
         return cls(
-            message_id,
             chunk_index,
             total_chunks,
-            json_loadb(data[metadata_start:metadata_end_offset]),
-            data[metadata_end_offset:]
+            metadata,
+            raw_data
         )
 
     def to_bytes(self) -> bytes:
-        metadata_end_offset = self.chunk_header_size + self.length_size + len(self.metadata)
-        return (
+        result = (
             self.code_byte +
-            self.chunk_header_pack(
-                self.message_id, self.chunk_index, self.total_chunks
-            ) +
-            self.length_pack(metadata_end_offset) +
-            self.metadata +
-            self.raw_data
+            self.chunk_header_pack(self.chunk_index, self.total_chunks)
         )
+
+        # Only first chunk includes metadata
+        if self.chunk_index == 0 and self.metadata is not None:
+            result += self.length_pack(len(self.metadata)) + self.metadata
+
+        result += self.raw_data
+        return result
 
 
 @dataclass
@@ -165,7 +173,7 @@ class CloseNotifyFrame(Frame):
 class StreamConnection(BaseConnection):
     __slots__ = (
         'reader', 'writer', 'connector', '_send_queue',
-        '_next_message_id', '_incomplete_messages'
+        '_incomplete_message'
     )
 
     reader: asyncio.StreamReader
@@ -174,8 +182,7 @@ class StreamConnection(BaseConnection):
 
     _send_queue: 'MessageQueue[Frame]'
     _handshake_result: 'HandshakeOk | None'
-    _next_message_id: int
-    _incomplete_messages: 'Dict[int, Dict[int, ChunkedMessageFrame]]'
+    _incomplete_message: 'Dict[int, ChunkedMessageFrame] | None'
 
     _MAX_CHUNK_SIZE = UINT32MAX + 1 - Frame.length_size
 
@@ -191,8 +198,7 @@ class StreamConnection(BaseConnection):
         self.reader, self.writer = reader, writer
         self.connector = connector
         self._send_queue = MessageQueue(DEFAULT_STREAM_HWM)
-        self._next_message_id = 0
-        self._incomplete_messages = {}
+        self._incomplete_message = None
 
     def update(self, connection: Self):
         if not connection._send_queue.empty():
@@ -231,37 +237,60 @@ class StreamConnection(BaseConnection):
             return
 
         # Message needs to be chunked
-        message_id = self._next_message_id
-        self._next_message_id = (self._next_message_id + 1) % UINT32MAX
-
-        # Calculate overhead for ChunkedMessageFrame
-        chunked_frame_overhead = (
+        # Calculate overhead for first chunk (includes metadata)
+        first_chunk_overhead = (
             1 +  # code byte
-            ChunkedMessageFrame.chunk_header_size +  # message_id, chunk_index, total_chunks
+            ChunkedMessageFrame.chunk_header_size +  # chunk_index, total_chunks
             Frame.length_size +  # metadata length
             len(metadata_bytes)
         )
 
-        # Calculate max data per chunk
-        max_data_per_chunk = self._MAX_CHUNK_SIZE - chunked_frame_overhead
+        # Calculate overhead for subsequent chunks (no metadata)
+        other_chunk_overhead = (
+            1 +  # code byte
+            ChunkedMessageFrame.chunk_header_size  # chunk_index, total_chunks
+        )
+
+        # Calculate max data for first chunk and other chunks
+        max_first_chunk_data = self._MAX_CHUNK_SIZE - first_chunk_overhead
+        max_other_chunk_data = self._MAX_CHUNK_SIZE - other_chunk_overhead
 
         # Split data into chunks
-        total_chunks = (len(raw_data) + max_data_per_chunk - 1) // max_data_per_chunk
+        chunks = []
+        offset = 0
 
-        for chunk_index in range(total_chunks):
-            start = chunk_index * max_data_per_chunk
-            end = min(start + max_data_per_chunk, len(raw_data))
-            chunk_data = raw_data[start:end]
+        # First chunk
+        first_chunk_size = min(max_first_chunk_data, len(raw_data))
+        chunks.append(ChunkedMessageFrame(
+            chunk_index=0,
+            total_chunks=0,  # Will be updated later
+            metadata=metadata_bytes,
+            raw_data=raw_data[offset:offset + first_chunk_size]
+        ))
+        offset += first_chunk_size
 
-            await self._send_queue.put(
-                ChunkedMessageFrame(
-                    message_id,
-                    chunk_index,
-                    total_chunks,
-                    metadata_bytes,
-                    chunk_data
-                )
-            )
+        # Remaining chunks
+        chunk_index = 1
+        while offset < len(raw_data):
+            chunk_size = min(max_other_chunk_data, len(raw_data) - offset)
+            chunks.append(ChunkedMessageFrame(
+                chunk_index=chunk_index,
+                total_chunks=0,  # Will be updated later
+                metadata=None,
+                raw_data=raw_data[offset:offset + chunk_size]
+            ))
+            offset += chunk_size
+            chunk_index += 1
+
+        # Update total_chunks in all frames
+        total_chunks = len(chunks)
+        for chunk in chunks:
+            chunk.total_chunks = total_chunks
+
+        # Wait for queue to have space for first chunk, then send all chunks atomically
+        await self._send_queue.put(chunks[0])
+        for chunk in chunks[1:]:
+            self._send_queue.put_nowait(chunk)
 
     async def close(self):
         close_chunk = CloseNotifyFrame.to_bytes_with_header()
@@ -305,7 +334,7 @@ class StreamConnection(BaseConnection):
             raise
         finally:
             # Discard incomplete messages on connection loss
-            self._incomplete_messages.clear()
+            self._incomplete_message = None
             write_task.cancel()
             await asyncio.wait([write_task])
 
@@ -314,38 +343,53 @@ class StreamConnection(BaseConnection):
             frame: ChunkedMessageFrame,
             request_received_cb: RequestReceivedCB
     ):
-        message_id = frame.message_id
+        # If we receive a non-first chunk without having the first chunk,
+        # discard it (can happen after connection loss)
+        if frame.chunk_index != 0 and self._incomplete_message is None:
+            logger.warning(
+                'Received chunk %d/%d without first chunk, discarding',
+                frame.chunk_index, frame.total_chunks
+            )
+            return
 
-        # Initialize message chunks dict if first chunk for this message
-        if message_id not in self._incomplete_messages:
-            self._incomplete_messages[message_id] = {}
+        # First chunk - initialize incomplete message
+        if frame.chunk_index == 0:
+            self._incomplete_message = {0: frame}
+            # If it's a single-chunk message, deliver immediately
+            if frame.total_chunks == 1:
+                request_received_cb(frame.metadata, frame.raw_data)
+                self._incomplete_message = None
+            return
 
-        chunks = self._incomplete_messages[message_id]
+        # Subsequent chunks
+        chunks = self._incomplete_message
         chunks[frame.chunk_index] = frame
 
         # Check if all chunks have been received
-        if len(chunks) == frame.total_chunks:
-            # Verify we have all chunks in order
-            if set(chunks.keys()) == set(range(frame.total_chunks)):
-                # Reassemble the message
-                sorted_chunks = [chunks[i] for i in range(frame.total_chunks)]
-                reassembled_data = b''.join(
-                    bytes(chunk.raw_data) for chunk in sorted_chunks
-                )
+        if len(chunks) != frame.total_chunks:
+            return
 
-                # Deliver the complete message
-                request_received_cb(frame.metadata, reassembled_data)
+        # Verify we have all chunks in sequence
+        if set(chunks.keys()) != set(range(frame.total_chunks)):
+            logger.warning(
+                'Incomplete chunk sequence: '
+                'expected %d chunks, got indices %s',
+                frame.total_chunks, sorted(chunks.keys())
+            )
+            self._incomplete_message = None
+            return
 
-                # Clean up
-                del self._incomplete_messages[message_id]
-            else:
-                logger.warning(
-                    'Incomplete chunk sequence for message %d: '
-                    'expected %d chunks, got indices %s',
-                    message_id, frame.total_chunks, sorted(chunks.keys())
-                )
-                # Clean up incomplete message
-                del self._incomplete_messages[message_id]
+        # Reassemble the message
+        sorted_chunks = [chunks[i] for i in range(frame.total_chunks)]
+        reassembled_data = b''.join(
+            bytes(chunk.raw_data) for chunk in sorted_chunks
+        )
+
+        # Deliver the complete message (metadata is in first chunk)
+        request_received_cb(sorted_chunks[0].metadata, reassembled_data)
+
+        # Clean up
+        self._incomplete_message = None
 
     async def _send_runner(self):
         write = self.writer.write
