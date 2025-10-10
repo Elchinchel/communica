@@ -111,20 +111,19 @@ class ChunkedMessageFrame(Frame):
     metadata: 'bytes | None'
     raw_data: 'bytes | memoryview'
 
-    # Packer for chunk_index, total_chunks (2 x uint32)
-    CHUNK_HEADER_PACKER = Struct('!II')
+    # Packer for chunk_index, total_chunks, metadata_length (3 x uint32)
+    CHUNK_HEADER_PACKER = Struct('!III')
     chunk_header_size = CHUNK_HEADER_PACKER.size
     chunk_header_pack = CHUNK_HEADER_PACKER.pack
     chunk_header_unpack_from = CHUNK_HEADER_PACKER.unpack_from
 
     @classmethod
     def _load(cls, data: memoryview):
-        chunk_index, total_chunks = cls.chunk_header_unpack_from(data, offset=0)
+        chunk_index, total_chunks, metadata_length = cls.chunk_header_unpack_from(data, offset=0)
 
-        # Check if this is the first chunk (contains metadata)
-        if chunk_index == 0:
-            metadata_length = cls.length_unpack_from(data, offset=cls.chunk_header_size)[0]
-            metadata_start = cls.chunk_header_size + cls.length_size
+        # Load metadata if present (first chunk only)
+        if metadata_length > 0:
+            metadata_start = cls.chunk_header_size
             metadata_end = metadata_start + metadata_length
             metadata = data[metadata_start:metadata_end]
             raw_data = data[metadata_end:]
@@ -141,14 +140,17 @@ class ChunkedMessageFrame(Frame):
         )
 
     def to_bytes(self) -> bytes:
+        # Calculate metadata length (0 for non-first chunks)
+        metadata_length = len(self.metadata) if self.metadata is not None else 0
+
         result = (
             self.code_byte +
-            self.chunk_header_pack(self.chunk_index, self.total_chunks)
+            self.chunk_header_pack(self.chunk_index, self.total_chunks, metadata_length)
         )
 
         # Only first chunk includes metadata
-        if self.chunk_index == 0 and self.metadata is not None:
-            result += self.length_pack(len(self.metadata)) + self.metadata
+        if metadata_length > 0:
+            result += self.metadata
 
         result += self.raw_data
         return result
@@ -182,7 +184,7 @@ class StreamConnection(BaseConnection):
 
     _send_queue: 'MessageQueue[Frame]'
     _handshake_result: 'HandshakeOk | None'
-    _incomplete_message: 'Dict[int, ChunkedMessageFrame] | None'
+    _incomplete_message: 'list[ChunkedMessageFrame] | None'
 
     _MAX_CHUNK_SIZE = UINT32MAX + 1 - Frame.length_size
 
@@ -240,15 +242,14 @@ class StreamConnection(BaseConnection):
         # Calculate overhead for first chunk (includes metadata)
         first_chunk_overhead = (
             1 +  # code byte
-            ChunkedMessageFrame.chunk_header_size +  # chunk_index, total_chunks
-            Frame.length_size +  # metadata length
+            ChunkedMessageFrame.chunk_header_size +  # chunk_index, total_chunks, metadata_length
             len(metadata_bytes)
         )
 
         # Calculate overhead for subsequent chunks (no metadata)
         other_chunk_overhead = (
             1 +  # code byte
-            ChunkedMessageFrame.chunk_header_size  # chunk_index, total_chunks
+            ChunkedMessageFrame.chunk_header_size  # chunk_index, total_chunks, metadata_length (=0)
         )
 
         # Calculate max data for first chunk and other chunks
@@ -354,39 +355,25 @@ class StreamConnection(BaseConnection):
 
         # First chunk - initialize incomplete message
         if frame.chunk_index == 0:
-            self._incomplete_message = {0: frame}
-            # If it's a single-chunk message, deliver immediately
-            if frame.total_chunks == 1:
-                request_received_cb(frame.metadata, frame.raw_data)
-                self._incomplete_message = None
+            self._incomplete_message = [frame]
             return
 
-        # Subsequent chunks
-        chunks = self._incomplete_message
-        chunks[frame.chunk_index] = frame
+        # Subsequent chunks - append to list
+        self._incomplete_message.append(frame)
 
         # Check if all chunks have been received
-        if len(chunks) != frame.total_chunks:
-            return
-
-        # Verify we have all chunks in sequence
-        if set(chunks.keys()) != set(range(frame.total_chunks)):
-            logger.warning(
-                'Incomplete chunk sequence: '
-                'expected %d chunks, got indices %s',
-                frame.total_chunks, sorted(chunks.keys())
-            )
-            self._incomplete_message = None
+        if len(self._incomplete_message) != frame.total_chunks:
             return
 
         # Reassemble the message
-        sorted_chunks = [chunks[i] for i in range(frame.total_chunks)]
         reassembled_data = b''.join(
-            bytes(chunk.raw_data) for chunk in sorted_chunks
+            chunk.raw_data for chunk in self._incomplete_message
         )
 
         # Deliver the complete message (metadata is in first chunk)
-        request_received_cb(sorted_chunks[0].metadata, reassembled_data)
+        # Deserialize metadata from bytes
+        metadata = json_loadb(self._incomplete_message[0].metadata)
+        request_received_cb(metadata, reassembled_data)
 
         # Clean up
         self._incomplete_message = None

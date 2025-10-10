@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager, asynccontextmanager
 
 import pytest
 from utils_simple_entities_for_tests import (
@@ -12,6 +13,28 @@ from communica.servers import SimpleServer
 from communica.connectors import RmqConnector, LocalConnector
 from communica.serializers import default_serializer
 from communica.connectors.stream.connector import TcpConnector, StreamConnection
+
+
+@contextmanager
+def temporary_chunk_size(size: int):
+    """Context manager to temporarily set StreamConnection._MAX_CHUNK_SIZE"""
+    original_size = StreamConnection._MAX_CHUNK_SIZE
+    StreamConnection._MAX_CHUNK_SIZE = size
+    try:
+        yield
+    finally:
+        StreamConnection._MAX_CHUNK_SIZE = original_size
+
+
+@asynccontextmanager
+async def simple_server_context(connector, handler, serializer):
+    """Async context manager for SimpleServer"""
+    server = SimpleServer(connector, handler, serializer)
+    await server.init()
+    try:
+        yield server
+    finally:
+        await server.close()
 
 
 class FastDyingRmqConnector(RmqConnector):
@@ -151,11 +174,7 @@ async def large_message_test_runner(
     connector: 'LocalConnector | TcpConnector'
 ):
     # Temporarily reduce chunk size to test chunking with reasonable data sizes
-    from communica.connectors.stream.connector import StreamConnection
-    original_chunk_size = StreamConnection._MAX_CHUNK_SIZE
-    StreamConnection._MAX_CHUNK_SIZE = 1024 * 1024  # 1MB for testing
-
-    try:
+    with temporary_chunk_size(1024 * 1024):  # 1MB for testing
         # Create a large message that exceeds the chunk size
         large_data = b'x' * (10 * 1024 * 1024)  # 10 MB
 
@@ -165,20 +184,12 @@ async def large_message_test_runner(
             received_messages.append(data)
             return b'response'
 
-        server = SimpleServer(connector, handler, default_serializer)
-        await server.init()
-
-        try:
+        async with simple_server_context(connector, handler, default_serializer):
             async with SimpleClient(connector, default_serializer) as client:
                 response = await client.request(large_data)
                 assert response == b'response'
                 assert len(received_messages) == 1
                 assert received_messages[0] == large_data
-        finally:
-            await server.close()
-    finally:
-        # Restore original chunk size
-        StreamConnection._MAX_CHUNK_SIZE = original_chunk_size
 
 
 @pytest.mark.asyncio
@@ -197,11 +208,7 @@ async def multiple_large_messages_test_runner(
     connector: 'LocalConnector | TcpConnector'
 ):
     # Temporarily reduce chunk size to test chunking with reasonable data sizes
-    from communica.connectors.stream.connector import StreamConnection
-    original_chunk_size = StreamConnection._MAX_CHUNK_SIZE
-    StreamConnection._MAX_CHUNK_SIZE = 1024 * 1024  # 1MB for testing
-
-    try:
+    with temporary_chunk_size(1024 * 1024):  # 1MB for testing
         # Create multiple different large messages
         large_data_1 = b'a' * (5 * 1024 * 1024)  # 5 MB
         large_data_2 = b'b' * (7 * 1024 * 1024)  # 7 MB
@@ -213,10 +220,7 @@ async def multiple_large_messages_test_runner(
             received_messages.append(data)
             return len(data)
 
-        server = SimpleServer(connector, handler, default_serializer)
-        await server.init()
-
-        try:
+        async with simple_server_context(connector, handler, default_serializer):
             async with SimpleClient(connector, default_serializer) as client:
                 resp1 = await client.request(large_data_1)
                 resp2 = await client.request(large_data_2)
@@ -229,31 +233,19 @@ async def multiple_large_messages_test_runner(
                 assert received_messages[0] == large_data_1
                 assert received_messages[1] == large_data_2
                 assert received_messages[2] == large_data_3
-        finally:
-            await server.close()
-    finally:
-        # Restore original chunk size
-        StreamConnection._MAX_CHUNK_SIZE = original_chunk_size
 
 
 @pytest.mark.asyncio
 async def test_chunking_boundary_conditions(tcp_connector):
     """Test messages at and around the chunk size boundary"""
-    from communica.connectors.stream.connector import StreamConnection
-    original_chunk_size = StreamConnection._MAX_CHUNK_SIZE
-    StreamConnection._MAX_CHUNK_SIZE = 1024 * 1024  # 1MB for testing
-
-    try:
+    with temporary_chunk_size(1024 * 1024):  # 1MB for testing
         received_messages = []
 
         def handler(data: bytes):
             received_messages.append(data)
             return b'ok'
 
-        server = SimpleServer(tcp_connector, handler, default_serializer)
-        await server.init()
-
-        try:
+        async with simple_server_context(tcp_connector, handler, default_serializer):
             async with SimpleClient(tcp_connector, default_serializer) as client:
                 # Test with a message just under chunk limit
                 data_small = b'x' * 1000
@@ -266,8 +258,3 @@ async def test_chunking_boundary_conditions(tcp_connector):
                 assert len(received_messages) == 2
                 assert received_messages[0] == data_small
                 assert received_messages[1] == data_medium
-        finally:
-            await server.close()
-    finally:
-        # Restore original chunk size
-        StreamConnection._MAX_CHUNK_SIZE = original_chunk_size
