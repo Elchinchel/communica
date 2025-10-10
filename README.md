@@ -38,17 +38,17 @@ Then, choose how Entities will connect to each other. This is what
 which technology Connector use, Entities don't know anything about
 it, so you can swap connectors without rewriting much code.
 Connectors are serializable to ASCII string,
-refer to their .dump_state() and .load_state() methods for details,
+refer to their .dump_state() and .from_state() methods for details,
 as the method parameters are specific to each connector type.
 
 Finally, data in request should somehow be transformed from Python
 objects to bytes and back. This is called serialization and
-that thing is done by Serializers. Currently, there are two serializers:
+that thing is done by *Serializers*. Currently, there are two serializers:
 `JsonSerializer`, which passes objects directly to `json.dump` and
 `AdaptixSerializer`, which first converts objects using
 [adaptix](https://github.com/reagento/adaptix) library before JSON
 serialization. AdaptixSerializer is particularly useful for handling
-Python objects with complex structures.
+Python objects with complicated structure.
 
 **Putting it all together**
 
@@ -88,18 +88,19 @@ asyncio.run(main())
 As you can see, server was started using Entity.run() and
 client with Entity's context manager. These methods are available for
 both Client and Server.\
-Also there is an [example](examples/route_client.py) for Route entities.
+Also there is an [example](https://github.com/Elchinchel/communica/blob/master/examples/route_client.py)
+for Route entities.
 
 **Entities:**\
 Pairs of Client and Server entities.
 
 | Entity | Description |
 | --- | --- |
-| Simple | These entities have only one handler and two operations: `request` (send message, wait response, return it) and `throw` (schedule message and don't wait for response). "Throwing" is useful in cases such as logging events or *fire-and-forget* notifications |
-| Route | Similar to simple, but have multiple handlers, identified by exact string match. |
+| SimpleClient, SimpleServer | These entities have only one handler and two operations: `request` (send message, wait response, return it) and `throw` (schedule message and don't wait for response). "Throwing" is useful in cases such as logging events or *fire-and-forget* notifications |
+| RouteClient, RouteServer | Similar to simple, but have multiple handlers, identified by exact string match. |
 
 **Connectors:**\
-Things which making connections. Connector can be serialized and passed to other processes, e.g. parent process creates connector, run server with it and start childs, which run clients with same connector.
+Things which making connections.
 
 | Connector | Description |
 | --- | --- |
