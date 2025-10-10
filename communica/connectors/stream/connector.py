@@ -3,6 +3,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from ssl import SSLContext
+from math import ceil
 from struct import Struct
 from typing import Any, Dict, Type, ClassVar, Optional
 from contextlib import suppress
@@ -14,6 +15,7 @@ from communica.utils import (
     ETX_CHAR,
     NULL_CHAR,
     UINT32MAX,
+    ByteSeq,
     MessageQueue,
     fmt_task_name,
     read_accessor,
@@ -82,8 +84,10 @@ class Frame(ABC):
 class MessageFrame(Frame):
     CODE = 10
 
-    metadata: Any
-    raw_data: 'bytes | memoryview'
+    header_size = Frame.length_size
+
+    metadata: ByteSeq
+    raw_data: ByteSeq
 
     @classmethod
     def _load(cls, data: memoryview):
@@ -108,29 +112,26 @@ class ChunkedMessageFrame(Frame):
 
     chunk_index: int
     total_chunks: int
-    metadata: 'bytes | None'
-    raw_data: 'bytes | memoryview'
+    metadata: ByteSeq
+    raw_data: ByteSeq
 
-    # Packer for chunk_index, total_chunks, metadata_length (3 x uint32)
-    CHUNK_HEADER_PACKER = Struct('!III')
+    CHUNK_HEADER_PACKER = Struct(
+        '!I'  # chunk index
+         'I'  # total chunks
+         'I'  # metadata length
+    )
     chunk_header_size = CHUNK_HEADER_PACKER.size
     chunk_header_pack = CHUNK_HEADER_PACKER.pack
     chunk_header_unpack_from = CHUNK_HEADER_PACKER.unpack_from
 
     @classmethod
     def _load(cls, data: memoryview):
-        chunk_index, total_chunks, metadata_length = cls.chunk_header_unpack_from(data, offset=0)
+        chunk_index, total_chunks, metadata_length = \
+            cls.chunk_header_unpack_from(data, offset=0)
 
-        # Load metadata if present (first chunk only)
-        if metadata_length > 0:
-            metadata_start = cls.chunk_header_size
-            metadata_end = metadata_start + metadata_length
-            metadata = data[metadata_start:metadata_end]
-            raw_data = data[metadata_end:]
-        else:
-            # Non-first chunks have no metadata
-            metadata = None
-            raw_data = data[cls.chunk_header_size:]
+        metadata_end = cls.chunk_header_size + metadata_length
+        metadata = data[cls.chunk_header_size:metadata_end]
+        raw_data = data[metadata_end:]
 
         return cls(
             chunk_index,
@@ -140,20 +141,12 @@ class ChunkedMessageFrame(Frame):
         )
 
     def to_bytes(self) -> bytes:
-        # Calculate metadata length (0 for non-first chunks)
-        metadata_length = len(self.metadata) if self.metadata is not None else 0
-
-        result = (
+        return (
             self.code_byte +
-            self.chunk_header_pack(self.chunk_index, self.total_chunks, metadata_length)
+            self.chunk_header_pack(self.chunk_index, self.total_chunks, len(self.metadata)) +
+            self.metadata +  # might be empty
+            self.raw_data
         )
-
-        # Only first chunk includes metadata
-        if metadata_length > 0:
-            result += self.metadata
-
-        result += self.raw_data
-        return result
 
 
 @dataclass
@@ -174,8 +167,7 @@ class CloseNotifyFrame(Frame):
 
 class StreamConnection(BaseConnection):
     __slots__ = (
-        'reader', 'writer', 'connector', '_send_queue',
-        '_incomplete_message'
+        'reader', 'writer', 'connector', '_send_queue'
     )
 
     reader: asyncio.StreamReader
@@ -184,9 +176,13 @@ class StreamConnection(BaseConnection):
 
     _send_queue: 'MessageQueue[Frame]'
     _handshake_result: 'HandshakeOk | None'
-    _incomplete_message: 'list[ChunkedMessageFrame] | None'
 
-    _MAX_CHUNK_SIZE = UINT32MAX + 1 - Frame.length_size
+    _MAX_CHUNK_SIZE = (
+        UINT32MAX -
+        len(MessageFrame.code_byte) -
+        MessageFrame.header_size
+    )
+    """Includes length of message header and code byte"""
 
     max_chunk_size: read_accessor[int] = read_accessor('_MAX_CHUNK_SIZE')
     """Max size of one message in bytes"""
@@ -200,7 +196,6 @@ class StreamConnection(BaseConnection):
         self.reader, self.writer = reader, writer
         self.connector = connector
         self._send_queue = MessageQueue(DEFAULT_STREAM_HWM)
-        self._incomplete_message = None
 
     def update(self, connection: Self):
         if not connection._send_queue.empty():
@@ -223,72 +218,42 @@ class StreamConnection(BaseConnection):
     async def send(self, metadata: Any, raw_data: bytes):
         metadata_bytes = json_dumpb(metadata)
 
-        # Calculate total size for MessageFrame (without outer header)
-        message_frame_size = (
-            1 +  # code byte
-            Frame.length_size +  # metadata length field
-            len(metadata_bytes) +
-            len(raw_data)
-        )
-
-        # If message fits in single frame, send as regular MessageFrame
-        if message_frame_size <= self._MAX_CHUNK_SIZE:
+        if len(metadata_bytes) + len(raw_data) <= self._MAX_CHUNK_SIZE:
             await self._send_queue.put(
                 MessageFrame(metadata_bytes, raw_data)
             )
             return
 
-        # Message needs to be chunked
-        # Calculate overhead for first chunk (includes metadata)
-        first_chunk_overhead = (
-            1 +  # code byte
-            ChunkedMessageFrame.chunk_header_size +  # chunk_index, total_chunks, metadata_length
-            len(metadata_bytes)
+        # There is actually one byte more than this but whatever
+        other_max_size = (
+            self._MAX_CHUNK_SIZE -
+            ChunkedMessageFrame.chunk_header_size
+        )
+        first_max_size = other_max_size - len(metadata)
+        total_chunks = 1 + ceil(
+            (len(raw_data) - first_max_size) / other_max_size
         )
 
-        # Calculate overhead for subsequent chunks (no metadata)
-        other_chunk_overhead = (
-            1 +  # code byte
-            ChunkedMessageFrame.chunk_header_size  # chunk_index, total_chunks, metadata_length (=0)
-        )
-
-        # Calculate max data for first chunk and other chunks
-        max_first_chunk_data = self._MAX_CHUNK_SIZE - first_chunk_overhead
-        max_other_chunk_data = self._MAX_CHUNK_SIZE - other_chunk_overhead
-
-        # Split data into chunks
-        chunks = []
         offset = 0
+        chunks = [
+            ChunkedMessageFrame(
+                chunk_index=0,
+                total_chunks=total_chunks,
+                metadata=metadata_bytes,
+                raw_data=raw_data[:first_max_size]
+            )
+        ]
+        offset += first_max_size
 
-        # First chunk
-        first_chunk_size = min(max_first_chunk_data, len(raw_data))
-        chunks.append(ChunkedMessageFrame(
-            chunk_index=0,
-            total_chunks=0,  # Will be updated later
-            metadata=metadata_bytes,
-            raw_data=raw_data[offset:offset + first_chunk_size]
-        ))
-        offset += first_chunk_size
-
-        # Remaining chunks
-        chunk_index = 1
-        while offset < len(raw_data):
-            chunk_size = min(max_other_chunk_data, len(raw_data) - offset)
+        for chunk_index in range(1, total_chunks):
             chunks.append(ChunkedMessageFrame(
                 chunk_index=chunk_index,
-                total_chunks=0,  # Will be updated later
-                metadata=None,
-                raw_data=raw_data[offset:offset + chunk_size]
+                total_chunks=total_chunks,
+                metadata=b'',
+                raw_data=raw_data[offset:offset+other_max_size]
             ))
-            offset += chunk_size
-            chunk_index += 1
+            offset += other_max_size
 
-        # Update total_chunks in all frames
-        total_chunks = len(chunks)
-        for chunk in chunks:
-            chunk.total_chunks = total_chunks
-
-        # Wait for queue to have space for first chunk, then send all chunks atomically
         await self._send_queue.put(chunks[0])
         for chunk in chunks[1:]:
             self._send_queue.put_nowait(chunk)
@@ -308,6 +273,7 @@ class StreamConnection(BaseConnection):
         readexactly = self.reader.readexactly
         header_size = Frame.length_size
         header_unpack = Frame.length_unpack_from
+        chunked_frames_buf = []
 
         write_task = asyncio.create_task(
             self._send_runner(),
@@ -320,63 +286,48 @@ class StreamConnection(BaseConnection):
                 chunk = memoryview(await readexactly(chunk_len))
 
                 frame = Frame.from_bytes(chunk)
-                logger.debug('Received %r', frame)
+                logger.debug('Received %r',
+                             frame if len(chunk) < 1024 else frame.__class__)
                 if isinstance(frame, MessageFrame):
                     request_received_cb(frame.metadata, frame.raw_data)
                 elif isinstance(frame, ChunkedMessageFrame):
-                    self._handle_chunked_frame(frame, request_received_cb)
+                    self._handle_chunked_frame(
+                        frame, chunked_frames_buf, request_received_cb
+                    )
                 elif isinstance(frame, CloseNotifyFrame):
                     self.writer.close()
                     return
                 else:
-                    logger.warning('wtf')
+                    logger.warning('wtf %r', frame)
         except Exception as e:
             logger.info('Connection broken: %r', e)
             raise
         finally:
-            # Discard incomplete messages on connection loss
-            self._incomplete_message = None
             write_task.cancel()
             await asyncio.wait([write_task])
 
     def _handle_chunked_frame(
             self,
             frame: ChunkedMessageFrame,
+            chunks: list[ChunkedMessageFrame],
             request_received_cb: RequestReceivedCB
     ):
-        # If we receive a non-first chunk without having the first chunk,
-        # discard it (can happen after connection loss)
-        if frame.chunk_index != 0 and self._incomplete_message is None:
+        if frame.chunk_index != 0 and not chunks:
             logger.warning(
                 'Received chunk %d/%d without first chunk, discarding',
                 frame.chunk_index, frame.total_chunks
             )
             return
 
-        # First chunk - initialize incomplete message
-        if frame.chunk_index == 0:
-            self._incomplete_message = [frame]
+        chunks.append(frame)
+        if len(chunks) != frame.total_chunks:
             return
 
-        # Subsequent chunks - append to list
-        self._incomplete_message.append(frame)
+        reassembled_data = b''.join(chunk.raw_data for chunk in chunks)
+        metadata = json_loadb(chunks[0].metadata)
+        chunks.clear()
 
-        # Check if all chunks have been received
-        if len(self._incomplete_message) != frame.total_chunks:
-            return
-
-        # Reassemble the message
-        reassembled_data = b''.join(
-            chunk.raw_data for chunk in self._incomplete_message
-        )
-
-        # Deliver the complete message (metadata is in first chunk)
-        # Deserialize metadata from bytes
-        metadata = json_loadb(self._incomplete_message[0].metadata)
         request_received_cb(metadata, reassembled_data)
-
-        # Clean up
-        self._incomplete_message = None
 
     async def _send_runner(self):
         write = self.writer.write
@@ -392,7 +343,8 @@ class StreamConnection(BaseConnection):
                 header_pack(len(data)) +
                 data
             )
-            logger.debug('Sent %r', frame)
+            logger.debug('Sent %r',
+                         frame if len(data) < 1024 else frame.__class__)
 
             # yield to loop, giving chance to pause protocol
             await asyncio.sleep(0)

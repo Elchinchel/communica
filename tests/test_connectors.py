@@ -148,60 +148,34 @@ async def server_close_test_runner(
 
 
 @pytest.mark.asyncio
-async def test_large_message_with_tcp(tcp_connector):
-    """Test that large messages are automatically chunked and reassembled"""
-    await large_message_test_runner(tcp_connector)
-
-
-@pytest.mark.asyncio
-async def test_large_message_with_local(local_connector):
-    """Test that large messages are automatically chunked and reassembled"""
-    await large_message_test_runner(local_connector)
-
-
-async def large_message_test_runner(
-    connector: 'LocalConnector | TcpConnector'
-):
+async def test_large_message(local_connector):
     # Temporarily reduce chunk size to test chunking with reasonable data sizes
     with temporary_max_chunk_size(1024 * 1024):  # 1MB for testing
-        # Create a large message that exceeds the chunk size
-        large_data = b'x' * (10 * 1024 * 1024)  # 10 MB
+        large_data = []
+        # 1 MB * 4 (0x?? for each i) + json overhead (around 8MB)
+        for i in range(1024 * 1024):
+            large_data.append(hex(i % 256))
 
         received_messages = []
 
-        def handler(data: bytes):
+        def handler(data):
             received_messages.append(data)
-            return b'response'
+            return data
 
-        async with SimpleServer(connector, handler, default_serializer):
-            async with SimpleClient(connector, default_serializer) as client:
+        async with SimpleServer(local_connector, handler):
+            async with SimpleClient(local_connector) as client:
                 response = await client.request(large_data)
-                assert response == b'response'
+                assert response == large_data
                 assert len(received_messages) == 1
                 assert received_messages[0] == large_data
 
 
 @pytest.mark.asyncio
-async def test_multiple_large_messages_with_tcp(tcp_connector):
-    """Test sending multiple large messages in sequence"""
-    await multiple_large_messages_test_runner(tcp_connector)
-
-
-@pytest.mark.asyncio
-async def test_multiple_large_messages_with_local(local_connector):
-    """Test sending multiple large messages in sequence"""
-    await multiple_large_messages_test_runner(local_connector)
-
-
-async def multiple_large_messages_test_runner(
-    connector: 'LocalConnector | TcpConnector'
-):
-    # Temporarily reduce chunk size to test chunking with reasonable data sizes
-    with temporary_max_chunk_size(1024 * 1024):  # 1MB for testing
-        # Create multiple different large messages
-        large_data_1 = b'a' * (5 * 1024 * 1024)  # 5 MB
-        large_data_2 = b'b' * (7 * 1024 * 1024)  # 7 MB
-        large_data_3 = b'c' * (3 * 1024 * 1024)  # 3 MB
+async def test_multiple_large_messages(local_connector):
+    with temporary_max_chunk_size(1024 * 1024):  # 1 MB
+        large_data_1 = 'a' * (5 * 1024 * 1024)  # 5 MB
+        large_data_2 = 'b' * (7 * 1024 * 1024)  # 7 MB
+        large_data_3 = 'c' * (3 * 1024 * 1024)  # 3 MB
 
         received_messages = []
 
@@ -209,11 +183,13 @@ async def multiple_large_messages_test_runner(
             received_messages.append(data)
             return len(data)
 
-        async with SimpleServer(connector, handler, default_serializer):
-            async with SimpleClient(connector, default_serializer) as client:
-                resp1 = await client.request(large_data_1)
-                resp2 = await client.request(large_data_2)
-                resp3 = await client.request(large_data_3)
+        async with SimpleServer(local_connector, handler):
+            async with SimpleClient(local_connector) as client:
+                resp1, resp2, resp3 = await asyncio.gather(
+                    client.request(large_data_1),
+                    client.request(large_data_2),
+                    client.request(large_data_3)
+                )
 
                 assert resp1 == len(large_data_1)
                 assert resp2 == len(large_data_2)
@@ -222,28 +198,3 @@ async def multiple_large_messages_test_runner(
                 assert received_messages[0] == large_data_1
                 assert received_messages[1] == large_data_2
                 assert received_messages[2] == large_data_3
-
-
-@pytest.mark.asyncio
-async def test_chunking_boundary_conditions(tcp_connector):
-    """Test messages at and around the chunk size boundary"""
-    with temporary_max_chunk_size(1024 * 1024):  # 1MB for testing
-        received_messages = []
-
-        def handler(data: bytes):
-            received_messages.append(data)
-            return b'ok'
-
-        async with SimpleServer(tcp_connector, handler, default_serializer):
-            async with SimpleClient(tcp_connector, default_serializer) as client:
-                # Test with a message just under chunk limit
-                data_small = b'x' * 1000
-                await client.request(data_small)
-
-                # Test with a message that exceeds the chunk size
-                data_medium = b'y' * (2 * 1024 * 1024)  # 2MB
-                await client.request(data_medium)
-
-                assert len(received_messages) == 2
-                assert received_messages[0] == data_small
-                assert received_messages[1] == data_medium

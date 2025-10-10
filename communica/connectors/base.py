@@ -3,7 +3,7 @@ import asyncio
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Protocol, Awaitable, AsyncGenerator
 
-from communica.utils import logger
+from communica.utils import ByteSeq, logger
 from communica.serializers.json import json_dumpb, json_loadb
 
 
@@ -19,7 +19,7 @@ class ClientConnectedCB(Protocol):
 
 
 class RequestReceivedCB(Protocol):
-    def __call__(self, metadata: Any, raw_data: 'bytes | memoryview'): ...
+    def __call__(self, metadata: Any, raw_data: ByteSeq): ...
 
 
 class HandshakeOk: ...

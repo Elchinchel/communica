@@ -127,6 +127,10 @@ class MessageQueue(HasLoopMixin, Generic[_TV]):
     def put_back(self, item: _TV):
         self._queue.appendleft(item)
 
+    def put_nowait(self, item: _TV):
+        """Put item in queue, ignoring length"""
+        self._queue.append(item)
+
     async def put(self, item: _TV):
         if len(self._queue) >= self._max_items:
             waiter = self._get_loop().create_future()
@@ -241,7 +245,7 @@ def cycle_range(start: int, stop: int):
     while True:
         yield i
         if i >= stop:
-            i = 0
+            i = start
         else:
             i += 1
 
