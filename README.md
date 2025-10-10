@@ -86,7 +86,7 @@ asyncio.run(main())
 ```
 
 As you can see, server was started using Entity.run() and
-client with Entity's context manager. This methods are available for
+client with Entity's context manager. These methods are available for
 both Client and Server.\
 Also there is an [example](examples/route_client.py) for Route entities.
 
