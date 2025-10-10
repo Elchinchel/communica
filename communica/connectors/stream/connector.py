@@ -134,12 +134,13 @@ class ChunkedMessageFrame(Frame):
         )
 
     def to_bytes(self) -> bytes:
+        metadata_end_offset = self.chunk_header_size + self.length_size + len(self.metadata)
         return (
             self.code_byte +
             self.chunk_header_pack(
                 self.message_id, self.chunk_index, self.total_chunks
             ) +
-            self.length_pack(len(self.metadata) + self.chunk_header_size + self.length_size) +
+            self.length_pack(metadata_end_offset) +
             self.metadata +
             self.raw_data
         )
@@ -214,15 +215,16 @@ class StreamConnection(BaseConnection):
     async def send(self, metadata: Any, raw_data: bytes):
         metadata_bytes = json_dumpb(metadata)
 
-        # Calculate overhead for a single MessageFrame
-        message_frame_overhead = (
+        # Calculate total size for MessageFrame (without outer header)
+        message_frame_size = (
             1 +  # code byte
-            Frame.length_size +  # metadata length
-            len(metadata_bytes)
+            Frame.length_size +  # metadata length field
+            len(metadata_bytes) +
+            len(raw_data)
         )
 
         # If message fits in single frame, send as regular MessageFrame
-        if len(raw_data) + len(metadata_bytes) <= self._MAX_CHUNK_SIZE:
+        if message_frame_size <= self._MAX_CHUNK_SIZE:
             await self._send_queue.put(
                 MessageFrame(metadata_bytes, raw_data)
             )
