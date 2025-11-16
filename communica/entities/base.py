@@ -67,15 +67,17 @@ class BaseClient(BaseEntity):
     __slots__ = ()
 
     @abstractmethod
-    async def init(self, timeout: 'int | None' = None) -> Self:
+    async def init(self, timeout: 'int | None' = 0) -> Self:
         """
         Establish connection with server.
 
-        On connect timeout cancels connect task.
+        On timeout cancels connect task.
 
         Args:
-            timeout: Time in seconds,
-              if omitted, method will block until connect succeed.
+            timeout: Time in seconds.
+              If omitted or zero, this method will block until connect succeed.
+              If None, connection initiation will start and any
+              .request() or .throw() calls will block until connect succeed.
 
         Raises:
             TimeoutError

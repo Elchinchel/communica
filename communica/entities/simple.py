@@ -279,18 +279,19 @@ class ReqRepClient(BaseClient, Generic[FlowT]):
             self._connected_event = asyncio.Event()
             return self._connected_event
 
-    async def init(self, timeout: 'int | None' = None):
+    async def init(self, timeout: 'int | None' = 0):
         if not self._run_task or self._run_task.done():
             self._run_task = self._get_loop().create_task(
                 self._connection_keeper(),
                 name=fmt_task_name('client-connection-keeper')
             )
 
-        try:
-            await asyncio.wait_for(self.connected_event.wait(), timeout)
-        except asyncio.TimeoutError:
-            self._run_task.cancel()
-            raise
+        if timeout is not None:
+            try:
+                await asyncio.wait_for(self.connected_event.wait(), timeout)
+            except asyncio.TimeoutError:
+                self._run_task.cancel()
+                raise
         return self
 
     async def close(self) -> None:
