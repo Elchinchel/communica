@@ -32,3 +32,12 @@ class BackoffDelayer:
         )
         if new_delay > self._delay:
             self._delay = new_delay
+
+
+def default_backoff_delayer():
+    return BackoffDelayer(
+        start_delay=1,
+        max_delay=30,
+        factor=2,
+        jitter=0.5
+    )

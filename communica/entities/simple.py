@@ -4,7 +4,7 @@ import logging
 from abc import abstractmethod
 from enum import Enum
 from uuid import uuid1, uuid4
-from typing import Any, Generic, TypeVar, TypedDict, cast
+from typing import Any, Generic, TypeVar, Callable, TypedDict, cast
 from traceback import format_exc
 from dataclasses import dataclass
 
@@ -25,6 +25,7 @@ from communica.entities.base import (
     SyncHandlerType,
     AsyncHandlerType,
 )
+from communica.utils.delayer import default_backoff_delayer
 from communica.connectors.base import (
     HandshakeOk,
     HandshakeGen,
@@ -279,10 +280,14 @@ class ReqRepClient(BaseClient, Generic[FlowT]):
             self._connected_event = asyncio.Event()
             return self._connected_event
 
-    async def init(self, timeout: 'int | None' = 0):
+    async def init(
+            self,
+            timeout: 'int | None' = 0,
+            delayer_factory: Callable[[], BackoffDelayer] = default_backoff_delayer,
+    ):
         if not self._run_task or self._run_task.done():
             self._run_task = self._get_loop().create_task(
-                self._connection_keeper(),
+                self._connection_keeper(delayer_factory),
                 name=fmt_task_name('client-connection-keeper')
             )
 
@@ -299,8 +304,8 @@ class ReqRepClient(BaseClient, Generic[FlowT]):
             await self._flow._connection.close()
             self._run_task.cancel()
 
-    async def _connection_keeper(self):
-        delayer = BackoffDelayer(1, 30, 2, 0.5)
+    async def _connection_keeper(self, delayer_factory: Callable[[], BackoffDelayer]):
+        delayer = delayer_factory()
         while True:
             try:
                 new_conn = await self.connector.client_connect(self._handshaker)
@@ -334,7 +339,7 @@ class ReqRepClient(BaseClient, Generic[FlowT]):
         yield HandshakeOk()
 
 
-class SimpleClient(ReqRepClient):
+class SimpleClient(ReqRepClient[SimpleMessageFlow]):
     """
     Pair to SimpleServer.
 
@@ -344,7 +349,6 @@ class SimpleClient(ReqRepClient):
     __slots__ = ('serializer',)
 
     serializer: BaseSerializer
-    _flow: SimpleMessageFlow
 
     def __init__(
             self,

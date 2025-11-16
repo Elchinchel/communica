@@ -1,13 +1,14 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from inspect import iscoroutinefunction
 from functools import wraps, partial
 from concurrent.futures import ThreadPoolExecutor
 
 from typing_extensions import Self, TypeAlias
 
-from communica.utils import HasLoopMixin, iscallable
+from communica.utils import HasLoopMixin, BackoffDelayer, iscallable
+from communica.utils.delayer import default_backoff_delayer
 from communica.connectors.base import BaseConnector
 
 
@@ -67,7 +68,11 @@ class BaseClient(BaseEntity):
     __slots__ = ()
 
     @abstractmethod
-    async def init(self, timeout: 'int | None' = 0) -> Self:
+    async def init(
+        self,
+        timeout: 'int | None' = 0,
+        delayer_factory: Callable[[], BackoffDelayer] = default_backoff_delayer,
+    ) -> Self:
         """
         Establish connection with server.
 
@@ -78,9 +83,12 @@ class BaseClient(BaseEntity):
               If omitted or zero, this method will block until connect succeed.
               If None, connection initiation will start and any
               .request() or .throw() calls will block until connect succeed.
+            delayer_factory: function which returns
+              communica.utils.delayer.BackoffDelayer instance.
+              By default communica.utils.delayer.default_backoff_delayer is used.
 
         Raises:
-            TimeoutError
+            asyncio.TimeoutError
         """
         raise NotImplementedError
 
