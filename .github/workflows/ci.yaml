@@ -27,7 +27,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ".nox"
-          key: nox-${{ env.NOX_VERSION }}
+          key: nox-${{ env.NOX_VERSION }}-python-${{ matrix.python-version }}
 
       - name: Install nox
         run: pip install nox==$NOX_VERSION

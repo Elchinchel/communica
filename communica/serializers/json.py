@@ -40,11 +40,13 @@ try:
         ) -> None:
             self._option = orjson_dump_option
 
-        def orjson_dumpb(self, obj: Any) -> bytes:
+        def json_dumpb(self, obj: Any) -> bytes:
             return orjson.dumps(obj, option=self._option)
 
-        orjson_loadb = orjson.loads
+        def json_loadb(self, __obj: ByteSeq) -> Any:
+            return orjson.loads(__obj)
 
+    # probably mark as not public?
     json_dumpb = OrjsonSerializer().json_dumpb
     json_loadb = OrjsonSerializer().json_loadb
 except ModuleNotFoundError:
