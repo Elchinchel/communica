@@ -1,7 +1,9 @@
 import nox
 
 
-@nox.session
+@nox.session(
+        default=False
+)
 def docs(session: nox.Session):
     session.install('sphinx', 'myst-parser', 'python-docs-theme', 'sphinx-autodoc2')
     session.run('python3', '-m', 'sphinx', *session.posargs)
@@ -9,12 +11,12 @@ def docs(session: nox.Session):
 
 @nox.session(
     python=[
-        'python3.8',
         'python3.9',
         'python3.10',
         'python3.11',
         'python3.12',
         'python3.13',
+        'python3.14',
     ]
 )
 def test(session: nox.Session):

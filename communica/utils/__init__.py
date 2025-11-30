@@ -1,3 +1,2 @@
-from unsorted import *
-
 from .delayer import BackoffDelayer
+from .unsorted import *

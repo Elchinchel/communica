@@ -80,6 +80,7 @@ class Frame(ABC):
         return frame._load(data[1:])
 
 
+# TODO: keepalives maybe? is they needed?
 @dataclass
 class MessageFrame(Frame):
     CODE = 10

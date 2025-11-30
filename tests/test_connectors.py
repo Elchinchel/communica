@@ -104,6 +104,13 @@ class TestRmqConnector:
             chan = await rmq_connector.acquire_channel()
             await chan.inner.connection.close()
             await client.request(3)
+            assert messages == [1, 2, 3]
+
+
+# TODO: there is no test for all connectors
+# @pytest.mark.asyncio
+# async def test_connector(connector: BaseConnector):
+#     connector.server_start()
 
 
 @pytest.mark.asyncio
@@ -148,8 +155,7 @@ async def server_close_test_runner(
 
 
 @pytest.mark.asyncio
-async def test_large_message(local_connector):
-    # Temporarily reduce chunk size to test chunking with reasonable data sizes
+async def test_stream_connection_chunking(local_connector):
     with temporary_max_chunk_size(1024 * 1024):  # 1MB for testing
         large_data = []
         # 1 MB * 4 (0x?? for each i) + json overhead (around 8MB)
@@ -171,7 +177,7 @@ async def test_large_message(local_connector):
 
 
 @pytest.mark.asyncio
-async def test_multiple_large_messages(local_connector):
+async def test_stream_connection_chunking2(local_connector):
     with temporary_max_chunk_size(1024 * 1024):  # 1 MB
         large_data_1 = 'a' * (5 * 1024 * 1024)  # 5 MB
         large_data_2 = 'b' * (7 * 1024 * 1024)  # 7 MB
