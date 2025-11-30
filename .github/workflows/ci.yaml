@@ -36,7 +36,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Build and upload
-        run: python3 -c 'import os, base64\nprint(base64.b64encode(os.getenv("TWINE_PASSWORD").encode()))'
+        run: python3 -c 'import os, base64; print(base64.b64encode(os.getenv("TWINE_PASSWORD").encode()))'
         env:
           TWINE_PASSWORD: ${{ secrets.twine_password }}
 
