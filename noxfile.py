@@ -19,7 +19,7 @@ def docs(session: nox.Session):
 )
 def test(session: nox.Session):
     session.install(
-        '.[orjson, adaptix, rabbitmq]',
+        '.[orjson, adaptix, rabbitmq, msgpack]',
         'pytest', 'pytest-cov', 'pytest-asyncio'
     )
     session.run('pytest', *session.posargs)

@@ -44,7 +44,7 @@ class AdaptixSerializer(BaseSerializer, Generic[TReq, TResp]):
             request_model: 'Type[TReq] | None',
             response_model: 'Type[TResp] | None' = None,
             retort: 'adaptix.Retort | None' = None,
-            json_serializer: 'JsonSerializer | None' = None,
+            wire_serializer: 'BaseSerializer | None' = None,
     ) -> None:
         """
             Args:
@@ -54,6 +54,9 @@ class AdaptixSerializer(BaseSerializer, Generic[TReq, TResp]):
                 response_model: Type of object, which will be sent
                     from responder to requester.
                     None means no validation/conversion performed.
+                wire_serializer: Serializer used to convert data
+                    into bytes and vice versa. By default JsonSerializer.
+                    Adaptix defaults are JSON compatible too.
         """
 
         if not _HAVE_ADAPTIX:
@@ -62,7 +65,7 @@ class AdaptixSerializer(BaseSerializer, Generic[TReq, TResp]):
                 'Install communica with [adaptix] extra.'
             )
 
-        self._json = json_serializer or DEFAULT_JSON_SERIALIZER
+        self._json = wire_serializer or DEFAULT_JSON_SERIALIZER
         self._retort = retort or adaptix.Retort()  # pyright: ignore[reportPossiblyUnboundVariable]
         self._req_model = request_model or Any
         self._resp_model = response_model or Any

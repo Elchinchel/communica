@@ -19,6 +19,7 @@ dependencies = ["typing-extensions"]
 [project.optional-dependencies]
 orjson = ["orjson"]
 adaptix = ["adaptix"]
+msgpack = ["msgpack"]
 rabbitmq = ["aiormq", "yarl"]
 
 [project.urls]
