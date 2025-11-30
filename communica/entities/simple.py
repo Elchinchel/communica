@@ -292,6 +292,8 @@ class ReqRepClient(BaseClient, Generic[FlowT]):
             )
 
         if timeout is not None:
+            if timeout <= 0:
+                timeout = None
             try:
                 await asyncio.wait_for(self.connected_event.wait(), timeout)
             except asyncio.TimeoutError:
