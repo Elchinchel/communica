@@ -1,3 +1,6 @@
+from os import listdir
+from tempfile import TemporaryDirectory
+
 import nox
 
 
@@ -25,3 +28,15 @@ def test(session: nox.Session):
         'pytest', 'pytest-cov', 'pytest-asyncio'
     )
     session.run('pytest', *session.posargs)
+
+
+@nox.session(default=False)
+def upload(session: nox.Session):
+    session.install('build')
+
+    with TemporaryDirectory() as dist_dir:
+        session.run('pyproject-build', '--outdir', dist_dir)
+
+        session.install('twine')
+        with session.chdir(dist_dir):
+            session.run('twine', 'upload', '--non-interactive', *listdir(dist_dir))
