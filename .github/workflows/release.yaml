@@ -1,0 +1,25 @@
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: "pip install build twine"
+
+      - name: Build
+        run: "pyproject-build --outdir ${{ runner.temp }}/build_dist"
+
+      - name: Upload
+        run: "twine upload --non-interactive ${{ runner.temp }}/build_dist/*"
+        env:
+          TWINE_PASSWORD: ${{ secrets.twine_password }}

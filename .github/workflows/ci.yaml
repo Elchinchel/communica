@@ -1,9 +1,11 @@
 on:
   push:
 
+env:
+  NOX_VERSION: "2025.5.1"
+
 jobs:
   tests:
-    if: ${{ false }}
     strategy:
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
@@ -17,28 +19,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Cache nox sessions
+        uses: actions/cache@v4
+        with:
+          path: ".nox"
+          key: nox-${{ env.NOX_VERSION }}
+
       - name: Install nox
-        run: pip install nox
+        run: pip install nox==$NOX_VERSION
 
       - name: Run tests
         run: nox -r -s test-python${{ matrix.python-version }} -- -v
-
-  upload:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build and upload
-        run: python3 -c 'import os, base64; print(base64.b64encode(os.getenv("TWINE_PASSWORD").encode()))'
-        env:
-          TWINE_PASSWORD: ${{ secrets.twine_password }}
 
   # TODO
   # test_windows_local_connector:
@@ -56,4 +51,3 @@ jobs:
 
   #     - name: Run tests
   #       run: nox -r -s test-python${{ matrix.python-version }} -- -v -k
-
