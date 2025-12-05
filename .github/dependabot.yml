@@ -1,9 +1,10 @@
 version: 2
-open-pull-requests-limit: 3
-versioning-strategy: "widen"
+
 updates:
   - package-ecosystem: "pip"
     directory: "/"
+    versioning-strategy: "widen"
+    open-pull-requests-limit: 3
     schedule:
       interval: "monthly"
       
