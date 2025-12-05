@@ -5,7 +5,22 @@ env:
   NOX_VERSION: "2025.5.1"
 
 jobs:
+  files-changed:
+    runs-on: ubuntu-latest
+    outputs:
+      python_files: ${{ steps.changes.outputs.python_files }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            python_files:
+              - '*.py'
+
   tests:
+    if: needs.files-changed.outputs.python_files == 'true'
+    needs: files-changed
     strategy:
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
