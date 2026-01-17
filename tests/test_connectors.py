@@ -7,11 +7,13 @@ from utils_simple_entities_for_tests import (
     run_sequential_send_with_simples,
 )
 
-from tests.utils_misc import dummy_handshaker
+from tests.utils_misc import wait_second, dummy_handshaker
 from communica.clients import SimpleClient
 from communica.servers import SimpleServer
 from communica.connectors import RmqConnector, LocalConnector
 from communica.serializers import default_serializer
+from communica.connectors.base import BaseConnector, BaseConnection
+from communica.connectors.dummy import DummyConnector, _MemoryPipe
 from communica.connectors.stream.connector import TcpConnector, StreamConnection
 
 
@@ -107,10 +109,78 @@ class TestRmqConnector:
             assert messages == [1, 2, 3]
 
 
-# TODO: there is no test for all connectors
-# @pytest.mark.asyncio
-# async def test_connector(connector: BaseConnector):
-#     connector.server_start()
+class TestDummyConnector:
+    @pytest.mark.asyncio
+    async def test_memory_pipe(self):
+        pipe = _MemoryPipe('')
+        pipe.send(b'1')
+        pipe.send(b'2')
+        pipe.send(b'3')
+        messages = [
+            await wait_second(pipe.arecv()),
+            await wait_second(pipe.arecv()),
+            await wait_second(pipe.arecv()),
+        ]
+        assert messages == [b'1', b'2', b'3']
+
+        task = asyncio.create_task(pipe.arecv())
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        pipe.send(b'4')
+        await asyncio.sleep(0)
+        # _chain_future adds callback on wrapped future completion,
+        # so one iteration is not enough
+        await asyncio.sleep(0)
+        assert task.result() == b'4'
+
+    @pytest.mark.asyncio
+    async def test_dummy_connector(self):
+        connector = DummyConnector()
+        await run_concurrent_send_with_simples(connector, default_serializer)
+
+
+@pytest.mark.asyncio
+async def test_basic_communication(connector: BaseConnector):
+    messages = []
+
+    def on_connect(connection: BaseConnection):
+        def on_message(metadata, raw_data):
+            messages.append(raw_data)
+            assert metadata == 'cts' and raw_data == b'client_to_server'
+
+        asyncio.create_task(connection.send('stc', b'server_to_client'))
+        asyncio.create_task(connection.run_until_fail(on_message))
+
+    server = await connector.server_start(dummy_handshaker, on_connect)
+
+    conn = await connector.client_connect(dummy_handshaker)
+
+    async def check_is_alive():
+        await asyncio.sleep(0)
+        assert conn.is_alive, '`is_alive` property of new connection is falsey'
+
+    def on_client_message(metadata, raw_data):
+        async def respond():
+            await conn.send('cts', b'client_to_server')
+            for _ in range(100):  # bruh
+                if len(messages) > 1:
+                    break
+                await asyncio.sleep(0.01)
+            await conn.close()
+
+        assert metadata == 'stc' and raw_data == b'server_to_client'
+        messages.append(raw_data)
+        asyncio.create_task(respond())
+
+    asyncio.create_task(check_is_alive())
+    await conn.run_until_fail(on_client_message)
+
+    assert not conn.is_alive, '`is_alive` property of closed connection is truthy'
+    assert messages == [b'server_to_client', b'client_to_server']
+
+    server.close()
+    await server.wait_closed()
 
 
 @pytest.mark.asyncio
@@ -158,7 +228,7 @@ async def server_close_test_runner(
 async def test_stream_connection_chunking(local_connector):
     with temporary_max_chunk_size(1024 * 1024):  # 1MB for testing
         large_data = []
-        # 1 MB * 4 (0x?? for each i) + json overhead (around 8MB)
+        # 1 MB * 4 (0x?? for each i) + json overhead (around 8MB total)
         for i in range(1024 * 1024):
             large_data.append(hex(i % 256))
 

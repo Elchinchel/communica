@@ -40,6 +40,14 @@ class HandshakeFail(Exception):
 
 
 class BaseConnection(ABC):
+    """
+    Connections are created by Connectors.
+    Connection can pass metadata (arbitrary object serializable by JSON)
+    along with any bytes object (size limit is implementation specific)
+    to __other side__ and receive something back
+    (so Connection must be duplex)
+    """
+
     __slots__ = ('_alive', '_handshake_result')
 
     @property
@@ -117,6 +125,9 @@ class BaseConnection(ABC):
         finally:
             await handshake_gen.aclose()
 
+    # FIXME: Connections should not restore their state on reconnect.
+    # If some state should be stored, outer entities may do this as well,
+    # reducing complexity of Connection (and their reconnects)
     @abstractmethod
     def update(self, connection) -> None:
         """

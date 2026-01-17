@@ -404,6 +404,7 @@ class BaseStreamConnector(BaseConnector):
     async def client_connect(self, handshaker: Handshaker):
         r, w = await self._open_connection()
         connection = StreamConnection(r, w, self)
+        # WTF: this doesn't work at all when handshake fails
         try:
             await connection._do_handshake(handshaker)
         except HandshakeFail as fail:

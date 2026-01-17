@@ -7,6 +7,7 @@ import pytest_asyncio
 from communica.utils import logger
 from communica.connectors import RmqConnector, TcpConnector, LocalConnector
 from communica.serializers import JsonSerializer
+from communica.connectors.dummy import DummyConnector
 from communica.connectors.rabbitmq import DEFAULT_POOL
 
 
@@ -19,6 +20,10 @@ RMQ_URL = os.getenv('RABBITMQ_URL', 'amqp://guest:guest@localhost:5672/')
 @pytest.fixture
 def serializer():
     return JsonSerializer()
+
+
+async def dummy_connector_factory():
+    yield DummyConnector()
 
 
 async def tcp_connector_factory():
@@ -41,12 +46,14 @@ async def rmq_connector_factory():
 tcp_connector = pytest_asyncio.fixture(name='tcp_connector')(tcp_connector_factory)
 local_connector = pytest_asyncio.fixture(name='local_connector')(local_connector_factory)
 rmq_connector = pytest_asyncio.fixture(name='rmq_connector')(rmq_connector_factory)
+dummy_connector = pytest_asyncio.fixture(name='dummy_connector')(dummy_connector_factory)
 
 
 @pytest_asyncio.fixture(params=[
     tcp_connector_factory,
     local_connector_factory,
-    rmq_connector_factory
+    rmq_connector_factory,
+    dummy_connector_factory,
 ])
 async def connector(request: pytest.FixtureRequest):
     factory = request.param
