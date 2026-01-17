@@ -16,7 +16,7 @@ jobs:
         with:
           filters: |
             python_files:
-              - '*.py'
+              - '**/*.py'
 
   tests:
     if: needs.files-changed.outputs.python_files == 'true'
