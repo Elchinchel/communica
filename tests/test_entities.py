@@ -51,7 +51,7 @@ class TestBaseEntities:
 
 
 class TestSimpleEntities:
-    async def test_error_handling(self, local_connector):
+    async def test_error_handling(self, dummy_connector):
         async def handler(data):
             if data == 1:
                 raise ValueError('hello')
@@ -60,8 +60,8 @@ class TestSimpleEntities:
             else:
                 raise ReqError('dude no such data', 404)
 
-        client = SimpleClient(local_connector)
-        server = SimpleServer(local_connector, handler)
+        client = SimpleClient(dummy_connector)
+        server = SimpleServer(dummy_connector, handler)
 
         async with server, client:
             with pytest.raises(UnknownError, match=r'ValueError.+hello'):
@@ -81,15 +81,15 @@ class TestSimpleEntities:
 
             await client.throw(1)
 
-    async def test_sequential_send(self, local_connector, serializer):
-        await run_sequential_send_with_simples(local_connector, serializer)
+    async def test_sequential_send(self, dummy_connector, serializer):
+        await run_sequential_send_with_simples(dummy_connector, serializer)
 
-    async def test_concurrent_send(self, local_connector, serializer):
-        await run_concurrent_send_with_simples(local_connector, serializer)
+    async def test_concurrent_send(self, dummy_connector, serializer):
+        await run_concurrent_send_with_simples(dummy_connector, serializer)
 
-    async def test_wait_for_client(self, local_connector):
-        server = SimpleServer(local_connector, lambda data: None)
-        client = SimpleClient(local_connector, lambda data: 'pivo')
+    async def test_wait_for_client(self, dummy_connector):
+        server = SimpleServer(dummy_connector, lambda data: None)
+        client = SimpleClient(dummy_connector, lambda data: 'pivo')
 
         async with server:
             wait_task = asyncio.create_task(
@@ -102,9 +102,9 @@ class TestSimpleEntities:
 
 
 class TestRouteEntities:
-    async def test_error_handling(self, local_connector):
-        client = RouteClient(local_connector)
-        server = RouteServer(local_connector)
+    async def test_error_handling(self, dummy_connector):
+        client = RouteClient(dummy_connector)
+        server = RouteServer(dummy_connector)
 
         @server.routes.handler('1')
         async def handler_1(data):
@@ -134,17 +134,17 @@ class TestRouteEntities:
                 assert e.code == 404
                 assert e.message == 'dude no such data'
 
-    async def test_bad_route(self, local_connector):
-        client = RouteClient(local_connector)
-        server = RouteServer(local_connector)
+    async def test_bad_route(self, dummy_connector):
+        client = RouteClient(dummy_connector)
+        server = RouteServer(dummy_connector)
 
         async with server, client:
             with pytest.raises(ReqError):
                 await wait_second(client.request('', None))
 
-    async def test_flow_update(self, local_connector):
-        client = RouteClient(local_connector)
-        server = RouteServer(local_connector)
+    async def test_flow_update(self, dummy_connector):
+        client = RouteClient(dummy_connector)
+        server = RouteServer(dummy_connector)
 
         server.routes.handler('existed')(dummy_handler)
 
@@ -155,10 +155,10 @@ class TestRouteEntities:
 
             await wait_second(client.request('new', None))
 
-    async def test_bad_serializer(self, local_connector):
+    async def test_bad_serializer(self, dummy_connector):
         # XXX: what is this test actually testing?
-        client = RouteClient(local_connector)
-        server = RouteServer(local_connector)
+        client = RouteClient(dummy_connector)
+        server = RouteServer(dummy_connector)
 
         @server.routes.handler(
             'hello',
@@ -181,7 +181,7 @@ class TestRouteEntities:
                 ))
 
     @pytest.mark.asyncio
-    async def test_routing(self, local_connector):
+    async def test_routing(self, dummy_connector):
         async def run(entity: 'RouteClient | RouteServer', messages, done_event):
             for message in messages[:10]:
                 resp = await entity.request(str(message), message)
@@ -197,12 +197,12 @@ class TestRouteEntities:
                 return a
 
         cli_checker = MessageExistenceChecker(server_to_client_messages)
-        client = RouteClient(local_connector)
+        client = RouteClient(dummy_connector)
         for message in server_to_client_messages:
             add_handler(client, str(message), cli_checker)
 
         srv_checker = MessageExistenceChecker(client_to_server_messages)
-        server = RouteServer(local_connector)
+        server = RouteServer(dummy_connector)
         for message in client_to_server_messages:
             add_handler(server, str(message), srv_checker)
 
