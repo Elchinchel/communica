@@ -1,3 +1,7 @@
+    Archive note: While communica is still used by some of our internal services,
+    it lacks many features that would make it comfortable to work with.
+    For now, I don't have enough time or motivation to implement them.
+
 ## Inter-Process Communication (IPC) for Python
 
 Sometimes there is no need for complicated,
